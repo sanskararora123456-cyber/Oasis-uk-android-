@@ -42,6 +42,71 @@ the server address.
 
 ---
 
+## Every device, one set of records
+
+There is one database, on the server. Every phone and every computer reads and
+writes the same records, and sees each other's work as it happens.
+
+### On a computer
+
+Open the server's address in a browser. That is the app — there is nothing to
+install, nothing to build, and no Windows or Mac download to keep up to date.
+The server address fills itself in, because the page came from the server.
+
+Chrome or Edge will then offer to **install** it: it gets its own window, its
+own icon in the start menu or dock, and no browser furniture around it. That is
+the desktop app. The same offer appears on a phone browser, which is a way to
+put it on a spare handset without sideloading anything.
+
+Whatever has been published with `app release` is what gets served, so a change
+reaches every computer the moment it is published.
+
+### On a phone
+
+The APK, as before. It carries its own copy of the screens and can be updated
+without a new APK — see *Shipping new screens*.
+
+### Everyone sees the same thing, as it happens
+
+Each device holds a stream open to the server. When anyone saves, the others are
+told, and fetch the workspace again — usually within a few milliseconds. Nobody
+has to pull to refresh, and two people at the counter are never looking at
+different versions of the same day.
+
+What travels down that stream is only a nudge — "something changed, and it was
+not you". The records themselves are always fetched the usual way, through the
+same permission and branch checks, so the stream can never hand someone a
+branch they are not allowed to see.
+
+If two people edit the same record at once, the second save is refused with a
+message rather than quietly overwriting the first. That is the optimistic
+locking described under *Security model*.
+
+The stream survives a dropped connection and a phone going to sleep; it
+reconnects on its own, backing off if the server is unreachable. `/health`
+reports how many devices are currently connected.
+
+### Photographs
+
+Door photos and attachments are kept on the server too, so a picture taken on
+the counter phone is on the office computer, and a backup contains it.
+
+**This was a hole rather than a decision.** The app held photographs in memory,
+and in secure mode wrote them nowhere — so every product photo was lost the
+moment the app closed. They are stored in the database now, which also means the
+backup and the standby copy cover them without anything else having to remember.
+
+They are served on a signed address that expires, because the app shows them
+with an ordinary `<img>` and an `<img>` cannot send a sign-in header. A fresh
+address is handed out every time the workspace is fetched; an old one copied out
+of a log stops working.
+
+If the catalogue grows to thousands of photographs the database gets large, and
+the standby copy is a copy of the whole thing — lengthen
+`OASIS_REPLICA_EVERY_SECONDS` if that starts to matter.
+
+---
+
 ## If all you have is a phone
 
 You do not need a computer. The commands above assume one, but the whole thing
@@ -835,7 +900,7 @@ Back up the database file first and the change is reversible.
 npm test
 ```
 
-161 checks against a real server on a throwaway database.
+179 checks against a real server on a throwaway database.
 
 `test/totals-parity.test.js` (3) lifts `calcTotals` out of the app's own HTML and
 runs it against the server's copy over 5,000 randomly shaped documents — 65,000
@@ -864,6 +929,14 @@ invent stock — claiming 500 doors from a bill for 5, a purchase return that ad
 stock, negative quantities, an adjustment without the permission for it — while
 checking the legitimate paths still work, including the difference between a
 delivery note that moves doors and one that does not.
+
+`test/sync.test.js` (18) covers using it from several devices: that the server
+hands out the app and that it can be installed on a computer, that the app is
+never served from a stale cache, that a stream ticket is good once, that one
+device's save reaches another's stream while the device that made it is not told
+twice, that the stream carries no records of its own, and that photographs are
+stored, served only on a valid signature, not duplicated, and included in a
+backup.
 
 `test/firstrun.test.js` (8) covers setting up with no command line: that
 configuration alone creates a workspace that can be signed in to, that a restart

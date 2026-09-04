@@ -17947,16 +17947,20 @@ function OasisApp() {
         (async () => {
             const c = SECURE_SERVER_MODE ? null : await loadKey(CORE_KEY, null);
             const i = SECURE_SERVER_MODE ? {} : await loadKey(IMG_KEY, {});
+            let startingImages = null;
             const cfg = await loadSync();
             let initial = c ? upgradeCore({ ...BLANK_CORE, ...c }) : BLANK_CORE;
             if (cfg && cfg.url && cfg.token) {
                 try {
                     const remote = await serverCall(cfg, "/v1/client/bootstrap");
-                    if (remote.core) initial = upgradeCore({ ...BLANK_CORE, ...remote.core });
+                    if (remote.core) {
+                        initial = upgradeCore({ ...BLANK_CORE, ...remote.core });
+                        if (remote.core.images) startingImages = remote.core.images;
+                    }
                 } catch (_) { /* keep local cache until login/retry */ }
             }
             setCore(initial);
-            setImages(i || {});
+            setImages(startingImages || i || {});
             setSyncReady(true);
         })();
     }, []);
@@ -17964,6 +17968,39 @@ function OasisApp() {
         setToast(m);
         setTimeout(() => setToast(""), 2200);
     }, []);
+
+    /* Keep in step with the other devices.
+
+       When the server says someone else saved something, fetch the workspace
+       again. Only the data behind the screen changes: a form someone is filling
+       in holds its own copy of what they are typing, so nothing they have not
+       saved is disturbed. If they then save over a record that moved, the
+       server refuses it rather than letting either of them lose the other's
+       work. */
+    useEffect(() => {
+        if (!SECURE_SERVER_MODE || !me) return undefined;
+        let live = true;
+        let pending = null;
+
+        const refresh = () => {
+            // Several changes at once arrive as several nudges; fetch once.
+            if (pending) clearTimeout(pending);
+            pending = setTimeout(async () => {
+                if (!live) return;
+                try {
+                    const cfg = await loadSync();
+                    if (!cfg || !cfg.url || !cfg.token) return;
+                    const remote = await serverCall(cfg, "/v1/client/bootstrap");
+                    if (!live || !remote.core) return;
+                    setCore(upgradeCore({ ...BLANK_CORE, ...remote.core }));
+                    if (remote.core.images) setImages(remote.core.images);
+                } catch (_) { /* try again on the next nudge */ }
+            }, 400);
+        };
+
+        startLive(refresh);
+        return () => { live = false; if (pending) clearTimeout(pending); stopLive(); };
+    }, [me]);
     /* `baseCore` is what nextCore is compared against to work out what changed.
        It defaults to the state on screen, which is what an ordinary save wants.
        Signing in passes the state the server just sent, so only what the app
@@ -17973,10 +18010,41 @@ function OasisApp() {
         try {
             const cfg = await loadSync();
             const base = baseCore || core;
+
+            /* Photographs go to the server too.
+               They used to be held in memory and, in secure mode, never written
+               anywhere — so every product photo was lost when the app closed.
+               Anything still a data: URL here has just been taken or picked, so
+               it is uploaded; what comes back is an address, which is what the
+               screens already know how to show. */
+            if (nextImages && cfg && cfg.url && cfg.token) {
+                const pending = [];
+                for (const ownerId of Object.keys(nextImages || {})) {
+                    const slots = nextImages[ownerId] || {};
+                    for (const slot of Object.keys(slots)) {
+                        const value = slots[slot];
+                        if (typeof value === "string" && value.startsWith("data:")) {
+                            pending.push({ ownerId, slot, dataUrl: value });
+                        }
+                    }
+                }
+                if (pending.length) {
+                    // In small batches, because a photo is a few hundred KB.
+                    for (let i = 0; i < pending.length; i += 4) {
+                        const out = await serverCall(cfg, "/v1/files", {
+                            method: "POST",
+                            body: JSON.stringify({ files: pending.slice(i, i + 4) }),
+                        });
+                        if (out && out.urls) nextImages = out.urls;
+                    }
+                }
+            }
+
             if (nextCore && cfg && cfg.url && cfg.token && base) {
                 await syncChangedState(base, nextCore, cfg);
                 const remote = await serverCall(cfg, "/v1/client/bootstrap");
                 nextCore = upgradeCore({ ...BLANK_CORE, ...(remote.core || nextCore) });
+                if (remote.core && remote.core.images) nextImages = remote.core.images;
             }
             if (nextCore) {
                 setCore(nextCore);
@@ -22806,7 +22874,7 @@ function SignIn({ core, persist, onIn }) {
                 // things uploaded are what upgradeCore adds on a first run.
                 const fromServer = { ...BLANK_CORE, ...(remote.core || {}) };
                 const upgraded = upgradeCore(JSON.parse(JSON.stringify(fromServer)));
-                await persist(upgraded, undefined, fromServer);
+                await persist(upgraded, remote.core ? remote.core.images : undefined, fromServer);
                 onIn(remote.user || out.user);
                 return;
             } catch (e) { setErr(e.message || "Server sign-in failed"); return; }
@@ -23328,15 +23396,24 @@ const writeSetting = (key, value) => {
     try { if (NATIVE && NATIVE.setPref) NATIVE.setPref(key, value); } catch (_) {}
     try { if (window.localStorage) window.localStorage.setItem(key, value); } catch (_) {}
 };
+/* Served from the server itself — on a computer, or a phone browser — so there
+   is no address to type in. */
+const defaultServer = () => {
+    try {
+        if (typeof window !== "undefined" && window.OASIS_DEFAULT_SERVER) return String(window.OASIS_DEFAULT_SERVER);
+        if (typeof window !== "undefined" && /^https?:$/.test(window.location.protocol)) return window.location.origin;
+    } catch (_) {}
+    return "";
+};
 async function loadSync() {
     if (!SECURE_SERVER_MODE) return loadKey(SYNC_KEY, blankSync());
     try {
         // Only non-secret connection metadata is persisted. Access/refresh tokens
         // are deliberately memory-only and disappear when the app process ends.
         const raw = readSetting(SYNC_KEY);
-        if (!raw) return { ...blankSync(), token: SESSION.token, refreshToken: SESSION.refreshToken };
+        if (!raw) return { ...blankSync(), url: defaultServer(), token: SESSION.token, refreshToken: SESSION.refreshToken };
         const parsed = JSON.parse(raw) || {};
-        return { ...blankSync(), url: String(parsed.url || ""), workspace: String(parsed.workspace || ""), deviceLabel: String(parsed.deviceLabel || ""), user: String(parsed.user || ""), version: Number(parsed.version || 0), lastPull: parsed.lastPull || "", lastPush: parsed.lastPush || "", auto: !!parsed.auto, token: SESSION.token, refreshToken: SESSION.refreshToken };
+        return { ...blankSync(), url: String(parsed.url || defaultServer()), workspace: String(parsed.workspace || ""), deviceLabel: String(parsed.deviceLabel || ""), user: String(parsed.user || ""), version: Number(parsed.version || 0), lastPull: parsed.lastPull || "", lastPush: parsed.lastPush || "", auto: !!parsed.auto, token: SESSION.token, refreshToken: SESSION.refreshToken };
     } catch (_) { return { ...blankSync(), token: SESSION.token, refreshToken: SESSION.refreshToken }; }
 }
 async function saveSync(cfg) {
@@ -23349,11 +23426,85 @@ async function saveSync(cfg) {
     return true;
 }
 
+/* This device, so the server can leave it out when it tells everyone else that
+   something changed — its own copy is already up to date. */
+const DEVICE_ID = (() => {
+    try {
+        let id = readSetting("oasis:device");
+        if (!id) {
+            id = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : uid();
+            writeSetting("oasis:device", id);
+        }
+        return id;
+    } catch (_) { return uid(); }
+})();
+
+/* Changes as they happen.
+
+   A device used to find out about someone else's work only when it saved
+   something itself. Two people at the counter would look at different versions
+   of the same day. This holds a stream open to the server and refreshes when it
+   says something changed.
+
+   What arrives is only a nudge, never data: the workspace is then fetched the
+   usual way, through the same permission and branch checks. */
+const LIVE = { source: null, url: "", stop: null, onChange: null, retry: 0 };
+
+function stopLive() {
+    LIVE.onChange = null;
+    try { if (LIVE.source) LIVE.source.close(); } catch (_) {}
+    LIVE.source = null;
+    if (LIVE.stop) { clearTimeout(LIVE.stop); LIVE.stop = null; }
+}
+
+async function startLive(onChange) {
+    if (typeof EventSource === "undefined") return;   // nothing to do without it
+    stopLive();
+    LIVE.onChange = onChange;
+
+    const connect = async () => {
+        if (!LIVE.onChange) return;
+        let cfg;
+        try { cfg = await loadSync(); } catch (_) { return; }
+        if (!cfg || !cfg.url || !cfg.token) return;
+
+        let ticket;
+        try {
+            ticket = (await serverCall(cfg, "/v1/client/stream-ticket", { method: "POST" })).ticket;
+        } catch (_) {
+            // Not signed in any more, or the server is unreachable. Try later.
+            LIVE.retry = Math.min(60000, (LIVE.retry || 1000) * 2);
+            LIVE.stop = setTimeout(connect, LIVE.retry);
+            return;
+        }
+        if (!ticket || !LIVE.onChange) return;
+
+        const base = cfg.url.replace(/\/$/, "");
+        const source = new EventSource(base + "/v1/client/events?ticket=" +
+            encodeURIComponent(ticket) + "&device=" + encodeURIComponent(DEVICE_ID));
+        LIVE.source = source;
+
+        source.addEventListener("ready", () => { LIVE.retry = 0; });
+        source.addEventListener("changed", () => { if (LIVE.onChange) LIVE.onChange(); });
+        source.onerror = () => {
+            // A ticket is good once, so reconnecting means asking for another —
+            // EventSource's own retry would keep replaying a spent one.
+            try { source.close(); } catch (_) {}
+            if (LIVE.source === source) LIVE.source = null;
+            if (!LIVE.onChange) return;
+            LIVE.retry = Math.min(60000, (LIVE.retry || 1000) * 2);
+            LIVE.stop = setTimeout(connect, LIVE.retry);
+        };
+    };
+
+    await connect();
+}
+
 async function serverCall(cfg, path, options = {}) {
     if (!cfg.url) throw new Error("No server address saved");
     const request = async (token) => fetch(cfg.url.replace(/\/$/, "") + path, {
         ...options,
-        headers: { "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}), ...(options.headers || {}) },
+        headers: { "Content-Type": "application/json", "X-Oasis-Device": DEVICE_ID, ...(token ? { Authorization: "Bearer " + token } : {}), ...(options.headers || {}) },
     });
     let res = await request(cfg.token);
     if (res.status === 401 && cfg.refreshToken && path !== "/v1/auth/refresh") {

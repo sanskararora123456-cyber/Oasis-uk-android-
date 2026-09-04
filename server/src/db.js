@@ -184,6 +184,30 @@ const MIGRATIONS = [
      published   INTEGER NOT NULL DEFAULT 0,
      created_at  TEXT NOT NULL
    );`,
+
+  // 6 — photographs and attachments.
+  //
+  // These were kept on the device and, in secure mode, not kept at all: every
+  // product photo vanished when the app closed. They belong on the server with
+  // everything else, so they survive, and so a photo taken on one phone is
+  // there on the next.
+  //
+  // Held in the database rather than beside it, so a backup and the standby
+  // copy cover them without anything else having to remember to.
+  `CREATE TABLE IF NOT EXISTS files (
+     id            TEXT PRIMARY KEY,
+     workspace_id  TEXT NOT NULL,
+     owner_id      TEXT NOT NULL DEFAULT '',
+     slot          TEXT NOT NULL DEFAULT '',
+     content_type  TEXT NOT NULL DEFAULT 'application/octet-stream',
+     bytes         BLOB NOT NULL,
+     size          INTEGER NOT NULL DEFAULT 0,
+     sha256        TEXT NOT NULL DEFAULT '',
+     by_user       TEXT NOT NULL DEFAULT '',
+     created_at    TEXT NOT NULL
+   );
+   CREATE INDEX IF NOT EXISTS files_by_owner
+     ON files (workspace_id, owner_id, slot);`,
 ];
 
 /* A copy of the database exactly as it was before any migration runs.

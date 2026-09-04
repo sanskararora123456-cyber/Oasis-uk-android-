@@ -49,7 +49,7 @@ function sendJson(res, status, body) {
 function applyCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, X-Oasis-Device");
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
@@ -222,8 +222,13 @@ async function handleRefresh(req, res) {
 
 function handleBootstrap(req, res) {
   const actor = requireUser(req);
+  const core = assembleCore(actor.workspaceId, actor);
+  // Ready-to-use addresses for every photograph, in the shape the app's screens
+  // already read, so none of them had to change.
+  core.images = require("./files").urlsFor(actor.workspaceId);
+
   sendJson(res, 200, {
-    core: assembleCore(actor.workspaceId, actor),
+    core,
     user: publicUser(actor.workspaceId, actor.id),
     serverTime: new Date().toISOString(),
     serverVersion: VERSION,
@@ -260,6 +265,14 @@ async function handleOperations(req, res) {
       "INSERT OR REPLACE INTO idempotency (workspace_id, key, response, created_at) VALUES (?, ?, ?, ?)"
     ).run(actor.workspaceId, key, JSON.stringify(result), new Date().toISOString());
   }
+
+  // Nudge the other devices in this workspace. Only a nudge — they fetch the
+  // workspace themselves, through the same checks as always.
+  require("./live").announce(actor.workspaceId, {
+    by: actor.name,
+    byDevice: String(req.headers["x-oasis-device"] || ""),
+    what: operations.length + " change(s)",
+  });
 
   sendJson(res, 200, result);
 }
@@ -315,6 +328,162 @@ function handleAppBundle(req, res) {
   res.end(body);
 }
 
+/* ------------------------ photographs and attachments ---------------------- */
+
+async function handleFileUpload(req, res) {
+  const actor = requireUser(req);
+  const body = await readJson(req);
+  const files = require("./files");
+
+  const items = Array.isArray(body.files) ? body.files : [body];
+  if (!items.length) throw new HttpError(400, "Nothing to upload");
+  if (items.length > 20) throw new HttpError(400, "Send at most 20 files at a time");
+
+  const stored = [];
+  for (const item of items) {
+    const ownerId = String(item.ownerId || "");
+    const slot = String(item.slot || "");
+    if (!ownerId || !slot) throw new HttpError(400, "Each file needs an ownerId and a slot");
+
+    if (!item.dataUrl) {
+      files.remove(actor.workspaceId, ownerId, slot);
+      stored.push({ ownerId, slot, removed: true });
+      continue;
+    }
+    try {
+      const made = files.store(actor.workspaceId, actor, ownerId, slot, item.dataUrl);
+      stored.push({ ownerId, slot, id: made.id, bytes: made.bytes });
+    } catch (err) {
+      throw new HttpError(400, "That file was refused: " + err.message);
+    }
+  }
+
+  require("./live").announce(actor.workspaceId, {
+    by: actor.name,
+    byDevice: String(req.headers["x-oasis-device"] || ""),
+    what: stored.length + " file(s)",
+  });
+
+  sendJson(res, 200, { stored, urls: require("./files").urlsFor(actor.workspaceId) });
+}
+
+/* Served on a signed address rather than a token, because the app shows these
+   with an ordinary <img> and an <img> cannot send a header. */
+function handleFileDownload(req, res, params) {
+  const files = require("./files");
+  const url = new URL(req.url, "http://placeholder");
+  const id = params.id;
+
+  if (!files.verifyPath(id, url.searchParams.get("e"), url.searchParams.get("s"))) {
+    throw new HttpError(403, "That link has expired. Reopen the screen to get a fresh one.");
+  }
+  const row = files.read(id);
+  if (!row) throw new HttpError(404, "No such file");
+
+  const body = Buffer.from(row.bytes);
+  res.writeHead(200, {
+    "Content-Type": row.content_type,
+    "Content-Length": body.length,
+    // The address carries its own expiry, so it is safe for the browser to keep
+    // the picture for as long as the address is good.
+    "Cache-Control": "private, max-age=3600",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Disposition": "inline",
+  });
+  res.end(body);
+}
+
+/* ------------------------- the app, for a computer ------------------------- */
+
+function sendText(res, status, body, type, extra) {
+  const buf = Buffer.from(body);
+  res.writeHead(status, Object.assign({
+    "Content-Type": type,
+    "Content-Length": buf.length,
+  }, extra || {}));
+  res.end(buf);
+}
+
+function handleApp(req, res) {
+  const page = require("./webapp").serveableHtml();
+  if (!page) throw new HttpError(503, "The app is not available on this server");
+
+  const webapp = require("./webapp");
+  const etag = webapp.etagFor(page.html);
+  if (req.headers["if-none-match"] === etag) {
+    res.writeHead(304, { ETag: etag });
+    res.end();
+    return;
+  }
+  sendText(res, 200, page.html, "text/html; charset=utf-8", {
+    // Always revalidate: a published release has to reach an open laptop the
+    // next time it is loaded, not whenever a cache decides.
+    "Cache-Control": "no-cache",
+    ETag: etag,
+    "X-Oasis-Version": String(page.version),
+  });
+}
+
+function handleManifest(req, res) {
+  sendText(res, 200, JSON.stringify(require("./webapp").MANIFEST, null, 2),
+    "application/manifest+json; charset=utf-8", { "Cache-Control": "no-cache" });
+}
+
+function handleServiceWorker(req, res) {
+  sendText(res, 200, require("./webapp").SERVICE_WORKER,
+    "text/javascript; charset=utf-8", { "Cache-Control": "no-cache" });
+}
+
+function handleIcon(req, res) {
+  const bytes = require("./webapp").iconBytes();
+  if (!bytes) throw new HttpError(404, "No icon");
+  res.writeHead(200, {
+    "Content-Type": "image/png",
+    "Content-Length": bytes.length,
+    "Cache-Control": "public, max-age=86400",
+  });
+  res.end(bytes);
+}
+
+/* --------------------------- changes as they happen ----------------------- */
+
+/* A signed-in device asks for a ticket, then opens the stream with it.
+   EventSource cannot send an Authorization header, and a real token in a URL
+   ends up in logs; a ticket is good once and for a minute. */
+function handleStreamTicket(req, res) {
+  const actor = requireUser(req);
+  sendJson(res, 200, require("./live").issueTicket(actor));
+}
+
+function handleEvents(req, res) {
+  const live = require("./live");
+  const url = new URL(req.url, "http://placeholder");
+  const claim = live.redeemTicket(url.searchParams.get("ticket"));
+  if (!claim) throw new HttpError(401, "That stream ticket is not valid any more. Ask for another.");
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    // Nginx and some proxies hold a response until it is finished unless told.
+    "X-Accel-Buffering": "no",
+  });
+
+  const connection = {
+    res,
+    workspaceId: claim.workspaceId,
+    userId: claim.userId,
+    deviceId: String(url.searchParams.get("device") || ""),
+  };
+  live.join(claim.workspaceId, connection);
+  live.write(connection, "ready", { at: new Date().toISOString() });
+
+  const drop = () => live.leave(claim.workspaceId, connection);
+  req.on("close", drop);
+  req.on("error", drop);
+  res.on("error", drop);
+}
+
 function handleHealth(req, res) {
   const replica = require("./replica").status();
   const setup = require("./firstrun").status();
@@ -327,6 +496,7 @@ function handleHealth(req, res) {
     version: VERSION,
     time: new Date().toISOString(),
     replica,
+    live: require("./live").status(),
     // So someone with only a browser can tell whether the server is ready to
     // be signed in to, without needing a shell to look.
     setup,
@@ -345,6 +515,22 @@ const ROUTES = [
   { method: "GET", path: "/v1/reports/summary", handler: handleReport },
   { method: "GET", path: "/v1/app/manifest", handler: handleAppManifest },
   { method: "GET", path: "/v1/app/bundle", handler: handleAppBundle },
+
+  // Changes as they happen.
+  { method: "POST", path: "/v1/client/stream-ticket", handler: handleStreamTicket },
+  { method: "GET", path: "/v1/client/events", handler: handleEvents },
+
+  // The app itself, for anything with a browser.
+  { method: "GET", path: "/", handler: handleApp },
+  { method: "GET", path: "/app", handler: handleApp },
+  { method: "GET", path: "/index.html", handler: handleApp },
+  { method: "GET", path: "/manifest.webmanifest", handler: handleManifest },
+  { method: "GET", path: "/sw.js", handler: handleServiceWorker },
+  { method: "GET", path: "/icon-512.png", handler: handleIcon },
+
+  // Photographs and attachments.
+  { method: "POST", path: "/v1/files", handler: handleFileUpload },
+  { method: "GET", pattern: /^\/v1\/files\/([A-Za-z0-9-]{6,64})$/, handler: handleFileDownload },
 ];
 
 async function route(req, res) {
@@ -358,10 +544,23 @@ async function route(req, res) {
   }
 
   const match = ROUTES.find((r) => r.path === path);
-  if (!match) throw new HttpError(404, "No such endpoint: " + path);
-  if (match.method !== req.method) throw new HttpError(405, "Use " + match.method + " for " + path);
+  if (match) {
+    if (match.method !== req.method) throw new HttpError(405, "Use " + match.method + " for " + path);
+    await match.handler(req, res, {});
+    return;
+  }
 
-  await match.handler(req, res);
+  // Routes carrying an id in the path.
+  for (const route of ROUTES) {
+    if (!route.pattern) continue;
+    const found = route.pattern.exec(path);
+    if (!found) continue;
+    if (route.method !== req.method) throw new HttpError(405, "Use " + route.method + " for " + path);
+    await route.handler(req, res, { id: found[1] });
+    return;
+  }
+
+  throw new HttpError(404, "No such endpoint: " + path);
 }
 
 const server = http.createServer((req, res) => {
@@ -396,6 +595,7 @@ function start() {
   require("./firstrun").runAndReport();
   require("./backup").startSchedule();
   require("./replica").startSchedule();
+  require("./live").startHeartbeat();
   server.listen(config.port, config.host, () => {
     console.log("Oasis server " + VERSION + " listening on " + config.host + ":" + config.port);
     console.log("Database: " + config.dbFile);
