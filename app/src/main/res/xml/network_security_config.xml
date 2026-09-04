@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Everything must go over HTTPS. A PIN and a company's whole customer list have
+  no business crossing a network in the clear, so plain http:// is refused.
+
+  The one exception is the device itself. Someone with a phone and no computer
+  can run the server on the phone (Termux), and reach it at 127.0.0.1 — traffic
+  that never touches a network cannot be listened to on one, and requiring a
+  certificate for a connection that does not leave the handset would only mean
+  there was no way to try the app at all.
+
+  This is for trying it out. A server living on one phone is a business whose
+  records die with that phone, and no other phone can reach it. The README says
+  so plainly, and says what to do instead.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

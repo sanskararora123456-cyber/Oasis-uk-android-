@@ -42,6 +42,77 @@ the server address.
 
 ---
 
+## If all you have is a phone
+
+You do not need a computer. The commands above assume one, but the whole thing
+can be set up from a phone browser instead — the server creates its first
+workspace and admin from its own configuration, so there is no command line
+anywhere in this.
+
+### The way to actually run the business
+
+Deploy from GitHub to a hosting service, in the browser:
+
+1. Go to **render.com**, sign in with GitHub.
+2. **New → Blueprint**, and pick this repository. It reads `server/render.yaml`.
+3. It asks for four values. These become your sign-in:
+
+   | Asks for | Type |
+   | --- | --- |
+   | `OASIS_SETUP_WORKSPACE` | `OASIS` |
+   | `OASIS_SETUP_NAME` | `Oasis UK Steel Doors` |
+   | `OASIS_SETUP_ADMIN` | your name, e.g. `Sanskar` |
+   | `OASIS_SETUP_PIN` | **8 to 12 digits you choose** — write it down |
+
+4. Deploy. When it finishes you get an address like
+   `https://oasis-server.onrender.com`.
+5. Open that address with `/health` on the end. When it says `"ready": true`,
+   the server is up and has a workspace to sign in to.
+6. In the app: **Server address** is that `https://…` address, **Workspace
+   code** is `OASIS`, **user name** and **PIN** are what you set above. Leave
+   **Authenticator code** empty.
+
+Then change your PIN in the app (**People → Staff and access**) and clear
+`OASIS_SETUP_PIN` from the hosting dashboard, so the PIN only exists as a hash
+on the server. Add the rest of your staff from that same screen — the command
+line is only ever needed for the first admin, and now not even for that.
+
+**The disk matters more than anything else here.** `render.yaml` asks for a
+1&nbsp;GB disk mounted at `/data`, which is where the database lives. That needs
+a paid instance — roughly a few hundred rupees a month. **A free instance has no
+disk: the filesystem is wiped on every redeploy, and your invoices with it.** Do
+not run the business on one.
+
+Railway, Fly.io and a plain VPS all work the same way; the only thing that
+matters is that `OASIS_DB` points somewhere that survives a restart.
+
+### Trying it today, for nothing
+
+To see it working before paying for anything, you can run the server on the
+phone itself:
+
+1. Install **Termux** from F-Droid (not the Play Store version, which is
+   abandoned).
+2. In Termux:
+
+   ```bash
+   pkg install nodejs git
+   git clone https://github.com/sanskararora123456-cyber/Oasis-uk-android-
+   cd Oasis-uk-android-/server
+   OASIS_SETUP_WORKSPACE=OASIS OASIS_SETUP_ADMIN=Sanskar OASIS_SETUP_PIN=12345678 npm start
+   ```
+
+3. In the app, the **Server address** is `http://127.0.0.1:8080`.
+
+That address is the one place plain `http://` is allowed, because the traffic
+never leaves the handset — see `network_security_config.xml`.
+
+This is for looking at, not for trading on: the records live on that one phone,
+no other phone can reach them, and they go when the phone does. Once you are
+happy with it, move to the hosting option above.
+
+---
+
 ## The app will not accept a plain `http://` address
 
 The Android app is built with `usesCleartextTraffic="false"`, so it refuses
@@ -102,6 +173,17 @@ Everything is an environment variable; nothing secret is in the repository.
 | `OASIS_BACKUP_KEEP` | `14` | How many to keep before deleting the oldest |
 | `OASIS_REPLICA_PATH` | off | Keep a live standby copy here (another disk or machine) |
 | `OASIS_REPLICA_EVERY_SECONDS` | `60` | How often to refresh the standby |
+| `OASIS_SETUP_WORKSPACE` | off | First-run only: workspace code to create, e.g. `OASIS` |
+| `OASIS_SETUP_NAME` | | First-run only: the firm's name |
+| `OASIS_SETUP_ADMIN` | | First-run only: the first admin's name |
+| `OASIS_SETUP_PIN` | | First-run only: their PIN, 8–12 digits |
+| `OASIS_SETUP_BRANCH` | `Head office` | First-run only: the first branch |
+| `OASIS_SETUP_BRANCH_CODE` | `HO` | First-run only: its short code |
+
+The `OASIS_SETUP_*` values are read only when the workspace named by
+`OASIS_SETUP_WORKSPACE` does not exist yet. Once it does they are ignored
+entirely, so a redeploy cannot reset a PIN someone has changed in the app. Clear
+`OASIS_SETUP_PIN` once you are signed in.
 
 Set `OASIS_JWT_SECRET` in production:
 
@@ -753,7 +835,7 @@ Back up the database file first and the change is reversible.
 npm test
 ```
 
-153 checks against a real server on a throwaway database.
+161 checks against a real server on a throwaway database.
 
 `test/totals-parity.test.js` (3) lifts `calcTotals` out of the app's own HTML and
 runs it against the server's copy over 5,000 randomly shaped documents — 65,000
@@ -782,6 +864,12 @@ invent stock — claiming 500 doors from a bill for 5, a purchase return that ad
 stock, negative quantities, an adjustment without the permission for it — while
 checking the legitimate paths still work, including the difference between a
 delivery note that moves doors and one that does not.
+
+`test/firstrun.test.js` (8) covers setting up with no command line: that
+configuration alone creates a workspace that can be signed in to, that a restart
+or redeploy changes nothing, that a PIN changed in the app is never reset by a
+redeploy, and that a bad PIN or a missing name is refused with something
+actionable rather than half-creating a workspace.
 
 `test/appdist.test.js` (15) covers shipping new screens: signing a release,
 that storing is not publishing, that what is served hashes and verifies to what

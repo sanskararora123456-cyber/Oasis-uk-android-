@@ -317,6 +317,7 @@ function handleAppBundle(req, res) {
 
 function handleHealth(req, res) {
   const replica = require("./replica").status();
+  const setup = require("./firstrun").status();
   // A stale replica is worth failing a health check over: whatever is watching
   // this service should know the standby has stopped keeping up.
   const ok = !replica.enabled || replica.healthy;
@@ -326,6 +327,9 @@ function handleHealth(req, res) {
     version: VERSION,
     time: new Date().toISOString(),
     replica,
+    // So someone with only a browser can tell whether the server is ready to
+    // be signed in to, without needing a shell to look.
+    setup,
   });
 }
 
@@ -386,6 +390,10 @@ const server = http.createServer((req, res) => {
 
 function start() {
   open();
+  // Create the workspace and its first admin if the configuration asks for it
+  // and there is nothing there yet. Lets the whole thing be set up from a
+  // hosting dashboard, with no command line anywhere.
+  require("./firstrun").runAndReport();
   require("./backup").startSchedule();
   require("./replica").startSchedule();
   server.listen(config.port, config.host, () => {

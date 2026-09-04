@@ -1,0 +1,52 @@
+# Deploying to Render straight from GitHub, with nothing but a browser.
+#
+#   render.com  ->  New  ->  Blueprint  ->  pick this repository
+#
+# Render reads this file, builds the server, and gives it an https address you
+# can type into the app. Filling in the four values marked `sync: false` is the
+# whole of the setup — there is no command line anywhere in this.
+#
+# The disk is not optional. Without it the filesystem is thrown away on every
+# redeploy, and the company database with it. A disk needs a paid instance;
+# a free one cannot keep your invoices, so do not run the business on it.
+
+services:
+  - type: web
+    name: oasis-server
+    runtime: docker
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
+    plan: starter
+    healthCheckPath: /health
+
+    disk:
+      name: oasis-data
+      mountPath: /data
+      sizeGB: 1
+
+    envVars:
+      # Signs the sign-in tokens. Render generates it once and keeps it.
+      - key: OASIS_JWT_SECRET
+        generateValue: true
+
+      # Your first workspace and admin, created the first time the server
+      # starts and never touched again. Fill these in when Render asks.
+      - key: OASIS_SETUP_WORKSPACE     # e.g. OASIS
+        sync: false
+      - key: OASIS_SETUP_NAME          # e.g. Oasis UK Steel Doors
+        sync: false
+      - key: OASIS_SETUP_ADMIN         # your name, e.g. Sanskar
+        sync: false
+      - key: OASIS_SETUP_PIN           # 8 to 12 digits — this is your sign-in PIN
+        sync: false
+
+      - key: OASIS_SETUP_BRANCH
+        value: Ghaziabad
+      - key: OASIS_SETUP_BRANCH_CODE
+        value: GZB
+
+      # A second copy of the database on the same disk, refreshed every minute.
+      # It will not save you from the disk itself failing — for that, download a
+      # backup now and then — but it covers a bad redeploy.
+      - key: OASIS_REPLICA_PATH
+        value: /data/standby/oasis.db
