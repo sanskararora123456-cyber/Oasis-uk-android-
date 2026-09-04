@@ -13,6 +13,7 @@
 
 const crypto = require("node:crypto");
 const { open } = require("./db");
+const { checkDocument, checkAmount } = require("./totals");
 
 /* Record collections, stored one row per record in `records`. */
 const FIELDS = [
@@ -75,8 +76,10 @@ function readUsers(workspaceId) {
   return rows.map((row) => {
     let extra = {};
     let perms = [];
+    let branches = [];
     try { extra = JSON.parse(row.extra) || {}; } catch (_) { extra = {}; }
     try { perms = JSON.parse(row.perms) || []; } catch (_) { perms = []; }
+    try { branches = JSON.parse(row.branches) || []; } catch (_) { branches = []; }
     delete extra.pin;
     return {
       ...extra,
@@ -84,6 +87,7 @@ function readUsers(workspaceId) {
       name: row.name,
       role: row.role,
       perms,
+      branches,
       branch: row.branch || "",
       active: !!row.active,
       _v: row.version,
@@ -92,9 +96,47 @@ function readUsers(workspaceId) {
   });
 }
 
-function assembleCore(workspaceId) {
+/* Collections where a record belongs to one branch. Customers, products,
+   categories, firms and staff are shared across the whole workspace. */
+const BRANCH_SCOPED = new Set([
+  "docs", "payments", "expenses", "supply", "commitments", "transfers", "journals", "accounts",
+]);
+
+const branchOf = (rec) => String((rec && (rec.branch || rec.branchId)) || "");
+
+/* Which branches this person may work in, or null for all of them.
+
+   The same rule the app uses: an admin sees everything, and so does anyone
+   whose branch list is empty. A list only ever narrows access. */
+function allowedBranches(actor) {
+  if (!actor) return null;
+  if (actor.role === "admin") return null;
+  const list = Array.isArray(actor.branches) ? actor.branches.filter(Boolean) : [];
+  return list.length ? new Set(list.map(String)) : null;
+}
+
+/* True when this person may touch a record belonging to `branchId`.
+   A record naming no branch is left alone: the app resolves it against the
+   first branch it can see, which is already one of this person's own. */
+function branchAllowed(allowed, branchId) {
+  if (!allowed) return true;
+  if (!branchId) return true;
+  return allowed.has(String(branchId));
+}
+
+function assembleCore(workspaceId, actor) {
+  const allowed = allowedBranches(actor);
   const core = {};
-  for (const field of FIELDS) core[field] = readField(workspaceId, field);
+  for (const field of FIELDS) {
+    let rows = readField(workspaceId, field);
+    if (allowed && BRANCH_SCOPED.has(field)) {
+      rows = rows.filter((rec) => branchAllowed(allowed, branchOf(rec)));
+    }
+    core[field] = rows;
+  }
+  if (allowed) {
+    core.branches = core.branches.filter((b) => allowed.has(String(b.id)));
+  }
 
   // The activity log is append-only and read newest-last, like the app writes it.
   core.audit.sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")));
@@ -183,6 +225,9 @@ function rebuildDocument(workspaceId, id, data) {
   const party = parties.find((p) => p.id === data.partyId) || { id: data.partyId, name: "" };
   const lines = Array.isArray(data.lines) ? data.lines : [];
 
+  // `disc` is a rupee amount per line, which is what the totals work on.
+  // `discount` was the wrong field: the app never sets it, so every line
+  // discount silently came out as zero.
   const items = lines.map((l) => ({
     kind: "product",
     productId: l.productId,
@@ -191,25 +236,12 @@ function rebuildDocument(workspaceId, id, data) {
     qty: Number(l.qty) || 0,
     unit: l.unit || "Nos",
     rate: Number(l.rate) || 0,
-    discount: Number(l.discount) || 0,
+    disc: Number(l.disc !== undefined ? l.disc : l.discount) || 0,
     taxRate: Number(l.taxRate) || 0,
     snapshot: l.snapshot || {},
   }));
 
-  const sub = items.reduce((sum, i) => {
-    const gross = i.qty * i.rate;
-    return sum + gross - (gross * (Number(i.discount) || 0)) / 100;
-  }, 0);
-  const billDiscount = Number(data.billDiscount) || 0;
-  const transport = Number(data.transport) || 0;
-  const taxable = Math.max(0, sub - billDiscount);
-  const tax = items.reduce((sum, i) => {
-    const gross = i.qty * i.rate;
-    const net = gross - (gross * (Number(i.discount) || 0)) / 100;
-    return sum + (net * (Number(i.taxRate) || 0)) / 100;
-  }, 0);
-
-  return {
+  const doc = {
     id,
     type: data.type,
     number: data.number || "",
@@ -218,15 +250,24 @@ function rebuildDocument(workspaceId, id, data) {
     branch: data.branchId || "",
     party,
     items,
-    transport,
-    billDisc: billDiscount,
+    transport: Number(data.transport) || 0,
+    billDisc: Number(data.billDiscount) || 0,
+    gstOn: !!data.gstOn,
+    gstRate: Number(data.gstRate) || 0,
+    interState: !!data.interState,
+    lineTax: !!data.lineTax,
+    charges: Array.isArray(data.charges) ? data.charges : [],
     refNo: data.referenceNumber || "",
     reason: data.reason || "",
-    totals: {
-      sub, discount: billDiscount, taxable,
-      tax, transport, grand: taxable + tax + transport,
-    },
   };
+
+  // Worked out here rather than taken on trust, using the same routine that
+  // checks what the app sends.
+  const { calcTotals } = require("./totals");
+  doc.totals = calcTotals(doc.items, doc.transport, doc.gstOn, doc.gstRate, doc.interState, {
+    lineTax: doc.lineTax, billDisc: doc.billDisc, charges: doc.charges,
+  });
+  return doc;
 }
 
 function rebuildSimple(id, data, extra) {
@@ -314,6 +355,13 @@ function applyOperation(workspaceId, actor, operation) {
   switch (op) {
     case "document.create": {
       const doc = clientRecord(data) || rebuildDocument(workspaceId, id, data);
+      // The figures on a document decide what a customer is billed, so they are
+      // re-derived from its own lines and refused if they disagree. The record
+      // itself is stored untouched either way.
+      const problems = checkDocument(doc);
+      if (problems.length) {
+        throw badRequest("These figures do not add up: " + problems.join("; "));
+      }
       putRecord(workspaceId, "docs", id, doc);
       noteDocumentNumber(workspaceId, doc);
       return;
@@ -322,18 +370,20 @@ function applyOperation(workspaceId, actor, operation) {
     case "payment.create":
     case "payment.correct": {
       if (op === "payment.correct") checkExpectedVersion(workspaceId, "payments", id, data);
-      putRecord(workspaceId, "payments", id, clientRecord(data) || rebuildSimple(id, data, {
-        branch: data.branchId || "",
-      }));
+      const payment = clientRecord(data) || rebuildSimple(id, data, { branch: data.branchId || "" });
+      const problems = checkAmount(payment, ["amount"]);
+      if (problems.length) throw badRequest("That payment was refused: " + problems.join("; "));
+      putRecord(workspaceId, "payments", id, payment);
       return;
     }
 
     case "expense.create":
     case "expense.correct": {
       if (op === "expense.correct") checkExpectedVersion(workspaceId, "expenses", id, data);
-      putRecord(workspaceId, "expenses", id, clientRecord(data) || rebuildSimple(id, data, {
-        branch: data.branchId || "",
-      }));
+      const expense = clientRecord(data) || rebuildSimple(id, data, { branch: data.branchId || "" });
+      const problems = checkAmount(expense, ["amount", "gstRate"]);
+      if (problems.length) throw badRequest("That expense was refused: " + problems.join("; "));
+      putRecord(workspaceId, "expenses", id, expense);
       return;
     }
 
@@ -437,6 +487,9 @@ function upsertUser(workspaceId, actor, id, record) {
     : (existing?.perms || "[]");
   const branch = canManage ? String(record.branch || "") : (existing?.branch || "");
   const active = canManage ? (record.active === false ? 0 : 1) : (existing ? existing.active : 1);
+  const branches = canManage
+    ? JSON.stringify(Array.isArray(record.branches) ? record.branches.map(String) : [])
+    : (existing?.branches || "[]");
 
   const pin = record.pin === undefined || record.pin === null ? "" : String(record.pin);
   let pinHash = existing ? existing.pin_hash : null;
@@ -457,21 +510,21 @@ function upsertUser(workspaceId, actor, id, record) {
   const at = nowIso();
   if (existing) {
     d.prepare(
-      `UPDATE users SET name = ?, name_lc = ?, role = ?, perms = ?, branch = ?, active = ?,
+      `UPDATE users SET name = ?, name_lc = ?, role = ?, perms = ?, branch = ?, branches = ?, active = ?,
          pin_hash = ?, pin_salt = ?, extra = ?, version = version + 1, deleted = 0, updated_at = ?
        WHERE workspace_id = ? AND id = ?`
     ).run(
-      name, name.toLowerCase(), role, perms, branch,
+      name, name.toLowerCase(), role, perms, branch, branches,
       active, pinHash, pinSalt, JSON.stringify(extra), at,
       workspaceId, id
     );
   } else {
     d.prepare(
-      `INSERT INTO users (workspace_id, id, name, name_lc, role, perms, branch, active,
+      `INSERT INTO users (workspace_id, id, name, name_lc, role, perms, branch, branches, active,
          pin_hash, pin_salt, extra, version, deleted, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`
     ).run(
-      workspaceId, id, name, name.toLowerCase(), role, perms, branch,
+      workspaceId, id, name, name.toLowerCase(), role, perms, branch, branches,
       active, pinHash, pinSalt, JSON.stringify(extra), at, at
     );
   }
@@ -489,6 +542,34 @@ function upsertUser(workspaceId, actor, id, record) {
   });
 }
 
+/* Refuse a write aimed at a branch this person does not work in. */
+function assertBranchAllowed(actor, operation) {
+  const allowed = allowedBranches(actor);
+  if (!allowed) return;
+
+  const op = String(operation.op || "");
+  const data = operation.data && typeof operation.data === "object" ? operation.data : {};
+  const field = UPSERT_FIELDS[op] || DELETE_FIELDS[op]
+    || (op.startsWith("document.") ? "docs" : "")
+    || (op.startsWith("payment.") ? "payments" : "")
+    || (op.startsWith("expense.") ? "expenses" : "");
+
+  const targets = [];
+  if (field && BRANCH_SCOPED.has(field)) {
+    targets.push(branchOf(data.client) || branchOf(data) || String(data.branchId || ""));
+  }
+  if (op === "stock.adjust") targets.push(String(data.branchId || ""));
+  if (op === "branch.upsert" || op === "branch.delete") targets.push(String(operation.id || ""));
+
+  for (const branchId of targets) {
+    if (!branchAllowed(allowed, branchId)) {
+      const err = new Error("That belongs to a branch you do not work in");
+      err.status = 403;
+      throw err;
+    }
+  }
+}
+
 function applyOperations(workspaceId, actor, operations) {
   const { assertAllowed } = require("./permissions");
 
@@ -497,6 +578,7 @@ function applyOperations(workspaceId, actor, operations) {
   for (const operation of operations) {
     if (!operation || typeof operation !== "object") throw badRequest("An operation was not an object");
     assertAllowed(workspaceId, actor, operation);
+    assertBranchAllowed(actor, operation);
   }
 
   let applied = 0;

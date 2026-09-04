@@ -30,6 +30,13 @@ const config = {
   /* Trust X-Forwarded-For. Turn this on only behind your own reverse proxy,
      otherwise a client can spoof its address and dodge the login lockout. */
   trustProxy: process.env.OASIS_TRUST_PROXY === "1",
+
+  /* Backups. Off unless an interval is set, because a copy on the same disk
+     protects against a mistake, not against the drive failing — see the README
+     for getting them off the machine. */
+  backupDir: process.env.OASIS_BACKUP_DIR || path.join(process.cwd(), "backups"),
+  backupEveryHours: num(process.env.OASIS_BACKUP_EVERY_HOURS, 0),
+  backupKeep: num(process.env.OASIS_BACKUP_KEEP, 14),
 };
 
 module.exports = { config };

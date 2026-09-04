@@ -134,6 +134,10 @@ CREATE INDEX IF NOT EXISTS login_attempts_scope ON login_attempts (scope, at);
 const MIGRATIONS = [
   // 1 — the starting schema.
   SCHEMA,
+
+  // 2 — which branches a person may work in. Empty means all of them, which is
+  // how the app reads it too, so existing staff keep the access they had.
+  `ALTER TABLE users ADD COLUMN branches TEXT NOT NULL DEFAULT '[]';`,
 ];
 
 function migrate(d) {

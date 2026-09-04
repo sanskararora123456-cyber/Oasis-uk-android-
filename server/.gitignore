@@ -4,3 +4,4 @@ data/
 *.db-shm
 node_modules/
 .env
+backups/

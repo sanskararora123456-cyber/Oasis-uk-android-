@@ -225,6 +225,72 @@ function addBranch(args) {
   console.log("Added branch '" + name + "' to " + workspace.code);
 }
 
+/* Restrict someone to certain branches, or clear the restriction. */
+function setBranches(args) {
+  const workspace = findWorkspace(args.workspace);
+  const name = String(args.name || "").trim();
+  if (!name) die("Give a --name");
+
+  const d = open();
+  const user = d.prepare("SELECT * FROM users WHERE workspace_id = ? AND name_lc = ? AND deleted = 0")
+    .get(workspace.id, name.toLowerCase());
+  if (!user) die("No one called '" + name + "' in " + workspace.code);
+
+  const all = open().prepare(
+    "SELECT id, json FROM records WHERE workspace_id = ? AND field = 'branches' AND deleted = 0"
+  ).all(workspace.id).map((r) => {
+    let rec = {};
+    try { rec = JSON.parse(r.json); } catch (_) { rec = {}; }
+    return { id: r.id, name: rec.name || "", code: rec.code || "" };
+  });
+
+  const wanted = args.all === true || String(args.branches || "") === ""
+    ? []
+    : String(args.branches).split(",").map((s) => s.trim()).filter(Boolean);
+
+  const ids = [];
+  for (const want of wanted) {
+    const hit = all.find((b) =>
+      b.id === want ||
+      b.code.toLowerCase() === want.toLowerCase() ||
+      b.name.toLowerCase() === want.toLowerCase());
+    if (!hit) {
+      die("No branch matching '" + want + "'. Known: " + all.map((b) => b.code || b.name).join(", "));
+    }
+    ids.push(hit.id);
+  }
+
+  d.prepare("UPDATE users SET branches = ?, version = version + 1, updated_at = ? WHERE workspace_id = ? AND id = ?")
+    .run(JSON.stringify(ids), nowIso(), workspace.id, user.id);
+
+  if (!ids.length) {
+    console.log(user.name + " may now work in every branch.");
+  } else {
+    const names = ids.map((id) => (all.find((b) => b.id === id) || {}).name || id);
+    console.log(user.name + " is now restricted to: " + names.join(", "));
+  }
+  console.log("They must sign in again for this to take effect on their device.");
+}
+
+function backup(args) {
+  const { backupNow, prune, list } = require("../src/backup");
+  if (args.list) {
+    const made = list(args.out);
+    if (!made.length) { console.log("No backups yet."); return; }
+    for (const b of made) {
+      console.log("  " + b.at + "  " + String(Math.round(b.bytes / 1024)).padStart(7) + " KB  " + b.file);
+    }
+    return;
+  }
+  const made = backupNow(args.out);
+  console.log("Backup written and verified:");
+  console.log("  " + made.file);
+  console.log("  " + made.records + " records, " + made.users + " staff, " +
+    made.workspaces + " workspace(s), " + Math.round(made.bytes / 1024) + " KB");
+  const gone = prune(args.out, args.keep);
+  if (gone.length) console.log("  removed " + gone.length + " older backup(s)");
+}
+
 function listWorkspaces() {
   const rows = open().prepare("SELECT * FROM workspaces ORDER BY created_at").all();
   if (!rows.length) {
@@ -250,6 +316,8 @@ function usage() {
   console.log("  list-users    --workspace OASIS");
   console.log("  reset-pin     --workspace OASIS --name \"...\" [--pin 12345678]");
   console.log("  add-branch    --workspace OASIS --name \"...\" [--code GZB] [--city ...]");
+  console.log("  set-branches  --workspace OASIS --name \"...\" --branches GZB,LONI   (or --all)");
+  console.log("  backup        [--out DIR] [--keep 14] [--list]");
   console.log("  list-workspaces");
   console.log("");
   console.log("Roles: " + ROLES.join(", "));
@@ -261,6 +329,8 @@ const COMMANDS = {
   "list-users": listUsers,
   "reset-pin": resetPin,
   "add-branch": addBranch,
+  "set-branches": setBranches,
+  "backup": backup,
   "list-workspaces": listWorkspaces,
 };
 

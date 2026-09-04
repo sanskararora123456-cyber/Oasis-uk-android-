@@ -55,6 +55,19 @@ const login = async (name, pin) => (await call("/v1/auth/login", {
   body: JSON.stringify({ workspaceCode: "PERM", name, pin }),
 })).body;
 
+/* A document with figures that genuinely add up — the server refuses any other
+   kind, so these fixtures test permissions rather than arithmetic. */
+const { calcTotals } = require("../src/totals");
+function doc(id, type, number) {
+  const items = [{ kind: "product", productId: "p1", qty: 2, rate: 5000, disc: 0, taxRate: 18 }];
+  return {
+    id, type, number: number || "",
+    items, transport: 0, gstOn: true, gstRate: 18, interState: false,
+    lineTax: false, billDisc: 0, charges: [],
+    totals: calcTotals(items, 0, true, 18, false, { lineTax: false, billDisc: 0, charges: [] }),
+  };
+}
+
 async function main() {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   baseUrl = "http://127.0.0.1:" + server.address().port;
@@ -79,7 +92,7 @@ async function main() {
   const productId = crypto.randomUUID();
   const accountId = crypto.randomUUID();
   await send(asBoss, [
-    { op: "document.create", id: docId, data: { client: { id: docId, type: "invoice", number: "OAS/HO/INV/25-26/001", totals: { grand: 50000 } } } },
+    { op: "document.create", id: docId, data: { client: doc(docId, "invoice", "OAS/HO/INV/25-26/001") } },
     { op: "product.upsert", id: productId, data: { id: productId, name: "Steel door", sellRate: 12500, costRate: 8000 } },
     { op: "account.upsert", id: accountId, data: { id: accountId, kind: "cash", name: "Cash box", opening: 100000 } },
   ]);
@@ -171,7 +184,7 @@ async function main() {
     const quoteId = crypto.randomUUID();
     const { status } = await send(asSam, [
       { op: "party.upsert", id: partyId, data: { id: partyId, name: "A customer", kind: "customer" } },
-      { op: "document.create", id: quoteId, data: { client: { id: quoteId, type: "quotation", totals: { grand: 1000 } } } },
+      { op: "document.create", id: quoteId, data: { client: doc(quoteId, "quotation") } },
     ]);
     assert.strictEqual(status, 200, "a salesman must still be able to quote: got " + status);
   });

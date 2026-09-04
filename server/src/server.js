@@ -106,7 +106,9 @@ function requireUser(req) {
   if (!row.active) throw new HttpError(403, "That sign-in has been switched off");
 
   let perms = [];
+  let branches = [];
   try { perms = JSON.parse(row.perms) || []; } catch (_) { perms = []; }
+  try { branches = JSON.parse(row.branches) || []; } catch (_) { branches = []; }
 
   return {
     workspaceId: claims.ws,
@@ -114,6 +116,7 @@ function requireUser(req) {
     name: row.name,
     role: row.role,
     perms,
+    branches,
     branch: row.branch || "",
   };
 }
@@ -206,7 +209,7 @@ async function handleRefresh(req, res) {
 function handleBootstrap(req, res) {
   const actor = requireUser(req);
   sendJson(res, 200, {
-    core: assembleCore(actor.workspaceId),
+    core: assembleCore(actor.workspaceId, actor),
     user: publicUser(actor.workspaceId, actor.id),
     serverTime: new Date().toISOString(),
     serverVersion: VERSION,
@@ -310,6 +313,7 @@ const server = http.createServer((req, res) => {
 
 function start() {
   open();
+  require("./backup").startSchedule();
   server.listen(config.port, config.host, () => {
     console.log("Oasis server " + VERSION + " listening on " + config.host + ":" + config.port);
     console.log("Database: " + config.dbFile);

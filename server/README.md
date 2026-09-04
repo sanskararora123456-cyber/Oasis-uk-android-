@@ -97,6 +97,9 @@ Everything is an environment variable; nothing secret is in the repository.
 | `OASIS_LOGIN_MAX_ATTEMPTS` | `8` | Failed sign-ins before lockout |
 | `OASIS_LOGIN_LOCKOUT` | `900` | Lockout length, seconds |
 | `OASIS_TRUST_PROXY` | off | Set `1` **only** behind your own proxy |
+| `OASIS_BACKUP_EVERY_HOURS` | `0` (off) | Back up automatically on this interval |
+| `OASIS_BACKUP_DIR` | `./backups` | Where backups are written |
+| `OASIS_BACKUP_KEEP` | `14` | How many to keep before deleting the oldest |
 
 Set `OASIS_JWT_SECRET` in production:
 
@@ -122,7 +125,15 @@ node bin/oasis-admin.js add-user    --workspace OASIS --name "..." [--role admin
 node bin/oasis-admin.js list-users  --workspace OASIS
 node bin/oasis-admin.js reset-pin   --workspace OASIS --name "..." [--pin 12345678]
 node bin/oasis-admin.js add-branch  --workspace OASIS --name "..." [--code GZB]
+node bin/oasis-admin.js set-branches --workspace OASIS --name "..." --branches GZB,LONI
+node bin/oasis-admin.js set-branches --workspace OASIS --name "..." --all
+node bin/oasis-admin.js backup [--out DIR] [--keep 14] [--list]
 ```
+
+`set-branches` restricts someone to certain branches: they are then sent only
+those branches' documents, payments, expenses and accounts, and cannot write into
+any other. `--all` lifts the restriction. They need to sign in again for it to
+take effect on their device.
 
 Roles are `admin`, `admin2`, `salesman`, `accountant`, `storeman`. Once an admin
 exists, everyone else is easier to add from the app's **People → Staff and access**
@@ -135,14 +146,56 @@ is forgotten, `reset-pin` issues a new one and signs that person's devices out.
 
 ## Backups
 
-Everything is in the one SQLite file. Copy it while the server runs:
+Everything is in the one SQLite file, so a backup is a consistent copy of it.
+**Never** copy `oasis.db` with `cp` while the server is running: you get a torn
+file that may only reveal itself months later, when you need it.
+
+Take one now:
 
 ```bash
-sqlite3 data/oasis.db ".backup '/backups/oasis-$(date +%F).db'"
+npm run backup                       # writes into ./backups and verifies it
+node bin/oasis-admin.js backup --list
+node bin/oasis-admin.js backup --out /mnt/usb --keep 30
 ```
 
-A nightly cron job doing that, kept off the machine, is a real backup. Copying
-`oasis.db` with `cp` while the server is writing is not.
+Each backup is written with SQLite's own `VACUUM INTO`, which produces a complete
+database while the server keeps serving. It is then reopened, put through an
+integrity check and counted, so a backup is never merely assumed to have worked.
+
+### Automatic
+
+Set an interval and the server backs itself up while it runs:
+
+```bash
+OASIS_BACKUP_EVERY_HOURS=6 OASIS_BACKUP_KEEP=28 npm start
+```
+
+That is already in `deploy/oasis-server.service`. It runs one on startup and then
+on the interval, keeping the newest `OASIS_BACKUP_KEEP` and deleting the rest.
+
+### Get them off the machine
+
+A backup on the same disk as the database protects you from a mistake, not from
+the drive failing. Copy them somewhere else — nightly is fine:
+
+```bash
+0 2 * * *  rsync -a /var/lib/oasis/backups/ user@elsewhere:/backups/oasis/
+```
+
+### Restoring
+
+Stop the server, put the file in place, start it:
+
+```bash
+sudo systemctl stop oasis-server
+sudo cp /backups/oasis-2026-09-04T02-00-00-000.db /var/lib/oasis/oasis.db
+sudo chown oasis:oasis /var/lib/oasis/oasis.db
+sudo systemctl start oasis-server
+```
+
+Everyone signs in again afterwards, and any work done after that backup was taken
+is gone. `test/integrity.test.js` restores a backup into a second server and signs
+in to it, so this path is exercised rather than hoped for.
 
 The app's own **Back up to a file** button is switched off in secure mode on
 purpose: it would put the whole company database on the phone, which is the thing
@@ -219,6 +272,17 @@ real money.
 - **A batch is all or nothing.** Permissions are checked across the whole batch
   before anything is applied, and the write runs in one transaction. A refused
   operation cannot leave half a save behind.
+- **The figures on a document have to add up.** Every document is re-totalled from
+  its own lines — line discounts, bill discount, transport, taxable and
+  non-taxable charges, per-line or flat GST, the CGST/SGST/IGST split — and
+  refused if what it claims disagrees by more than a paisa. Negative quantities,
+  negative payments and values that are not real numbers are refused too.
+  The record is stored exactly as it arrived or not at all; checking never
+  rewrites it.
+- **Branch scoping.** Someone restricted to a branch is sent only that branch's
+  documents, payments, expenses, stock movements, transfers and accounts, is not
+  told the other branches exist, and cannot write into them. They cannot widen
+  their own branch list.
 
 ### Not enforced — the honest list
 
@@ -226,34 +290,39 @@ real money.
   is the app's design, not a server choice: the sign-in screen accepts nothing
   else. Lockout and hashing make guessing impractical, but anyone who learns a
   PIN *is* that person. Treat PINs like keys to the shop.
-- **The server does not check your arithmetic.** The app computes document totals,
-  journals and stock, and this server stores what it is given. It enforces *who*
-  may write a record, not whether the numbers inside it add up. A modified client
-  could file an invoice whose total does not match its lines. Reworking this means
-  the server recomputing totals itself — a real piece of work, and it has to
-  produce byte-identical records or the app's change detection resends them
-  forever.
+- **Journals and stock levels are still the app's.** Document totals are checked
+  here; the ledger postings and stock quantities that follow from them are not
+  independently re-derived.
 - **Last write wins** on most records. Payment, expense and transfer corrections
   carry a version and get a `409` if someone else got there first; everything else
   does not. Two people editing one customer at the same moment: the later save
   wins silently.
-- **Branch scoping is not enforced.** A user assigned to one branch can still read
-  every branch through the API. The app filters the view; the server does not.
 - **An access token cannot be withdrawn early.** Signing someone out or changing
   their PIN kills their refresh token immediately, but an access token already
   issued stays valid until it expires — up to 30 minutes. Lower `OASIS_ACCESS_TTL`
   if that window matters to you.
-- **One machine, one file.** No replication and no failover. If the disk dies and
-  you have no backup, the data is gone. The backup section above is not optional.
+- **One machine.** Backups are automatic and verified (below), so a dead disk
+  costs you the time since the last one — but there is no second machine to take
+  over. Real failover means running a standby, which is a hosting decision, not a
+  change to this code.
 - **No file or photo storage.** Document images stay on the device.
 
 ### If you want it stronger
 
-In rough order of value for the effort: enforce branch scoping; add versions to
-every record so no save is ever silently overwritten; have the server recompute
-document totals and reject ones that do not match; add a second factor for admin
-accounts. Each is a contained change — the permission layer and the tests around
-it are the pattern to follow.
+In rough order of value for the effort: add versions to every record so no save is
+ever silently overwritten; re-derive journal postings and stock from documents; a
+second factor for admin accounts; a standby machine. Each is a contained change —
+the permission and totals layers, and the tests around them, are the pattern to
+follow.
+
+### Keeping the arithmetic in step
+
+`src/totals.js` is a deliberate copy of the app's `calcTotals`, operation for
+operation. If either changes without the other, correct invoices start getting
+refused. `test/totals-parity.test.js` guards this: it lifts `calcTotals` straight
+out of `app/src/main/assets/index.html`, runs both over 5,000 randomly shaped
+documents and requires all 65,000 figures to match exactly. Run the tests after
+touching either file.
 
 ## Changing the schema later
 
@@ -279,7 +348,12 @@ Back up the database file first and the change is reversible.
 npm test
 ```
 
-33 checks against a real server on a throwaway database.
+60 checks against a real server on a throwaway database.
+
+`test/totals-parity.test.js` (3) lifts `calcTotals` out of the app's own HTML and
+runs it against the server's copy over 5,000 randomly shaped documents — 65,000
+figures, all required to match exactly — then checks that documents the app
+produces are accepted and tampered ones are not.
 
 `test/api.test.js` (21) covers sign-in and its failure modes, PIN and token
 handling, workspace isolation, brute-force lockout, the byte-for-byte record
@@ -291,3 +365,8 @@ the app never offers them — deleting an invoice, rewriting a cost price, movin
 money, forging a journal entry, creating a branch, promoting themselves — and
 requires each to be refused, while checking that they can still quote and that
 an admin is not obstructed.
+
+`test/integrity.test.js` (24) inflates totals, understates tax, edits lines after
+totalling, breaks the GST split, sends negative and non-finite amounts; reads and
+writes across branch boundaries as a restricted user; and takes a backup, checks
+its contents, restores it into a second server and signs in to it.

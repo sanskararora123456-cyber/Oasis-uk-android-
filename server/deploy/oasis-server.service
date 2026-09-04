@@ -31,6 +31,13 @@ Environment=OASIS_JWT_SECRET=CHANGE_ME
 # Caddy sets X-Forwarded-For, so the sign-in lockout can trust it.
 Environment=OASIS_TRUST_PROXY=1
 
+# Back up every 6 hours, keeping a week's worth. These land on the same disk as
+# the database, which guards against a mistake but not against the drive dying —
+# copy them to another machine as well (see the README).
+Environment=OASIS_BACKUP_EVERY_HOURS=6
+Environment=OASIS_BACKUP_KEEP=28
+Environment=OASIS_BACKUP_DIR=/var/lib/oasis/backups
+
 # Sandboxing. The service only ever needs to write its database directory.
 NoNewPrivileges=true
 PrivateTmp=true

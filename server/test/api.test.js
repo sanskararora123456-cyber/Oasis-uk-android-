@@ -154,6 +154,19 @@ async function main() {
   const partyId = crypto.randomUUID();
   const docId = crypto.randomUUID();
 
+  // Built the way the app builds one, with its totals worked out by the same
+  // routine, because the server now refuses a document whose figures do not
+  // match its own lines.
+  const { calcTotals } = require("../src/totals");
+  const richItems = [{
+    kind: "product", productId: "p1", name: "Steel door 900x2100",
+    qty: 4, unit: "Nos", rate: 12500, disc: 500, taxRate: 18,
+    specs: [{ label: "Finish", value: "Powder coated" }],
+    snapshot: { name: "Steel door", categoryName: "Doors" },
+    hsn: "7308",
+  }];
+  const richCharges = [{ key: "c1", label: "Installation", amount: 2000, taxable: true }];
+
   const richDoc = {
     id: docId,
     type: "quotation",
@@ -161,19 +174,20 @@ async function main() {
     date: "2026-04-02",
     branch: branchId,
     party: { id: partyId, name: "Verma Builders", kind: "customer" },
-    items: [{
-      kind: "product", productId: "p1", name: "Steel door 900x2100",
-      qty: 4, unit: "Nos", rate: 12500, discount: 5, taxRate: 18,
-      specs: [{ label: "Finish", value: "Powder coated" }],
-      snapshot: { name: "Steel door", categoryName: "Doors" },
-      hsn: "7308",
-    }],
+    items: richItems,
     transport: 1500,
+    gstOn: true,
+    gstRate: 18,
+    interState: false,
+    lineTax: false,
+    billDisc: 0,
     note: "Site measurement pending",
-    charges: [{ label: "Installation", amount: 2000 }],
+    charges: richCharges,
     haul: { vehicle: "UP14 AB 1234" },
     extra: { sitePerson: "Mr Verma" },
-    totals: { sub: 47500, discount: 0, taxable: 47500, tax: 8550, transport: 1500, grand: 57550 },
+    totals: calcTotals(richItems, 1500, true, 18, false, {
+      lineTax: false, billDisc: 0, charges: richCharges,
+    }),
   };
 
   await test("operations apply and the document survives verbatim", async () => {
@@ -199,7 +213,7 @@ async function main() {
     // Everything the user typed has to survive, or it vanishes on their phone.
     assert.strictEqual(back.number, richDoc.number);
     assert.strictEqual(back.note, "Site measurement pending");
-    assert.strictEqual(back.totals.grand, 57550);
+    assert.strictEqual(back.totals.grand, richDoc.totals.grand);
     assert.strictEqual(back.charges[0].label, "Installation");
     assert.strictEqual(back.haul.vehicle, "UP14 AB 1234");
     assert.strictEqual(back.extra.sitePerson, "Mr Verma");
