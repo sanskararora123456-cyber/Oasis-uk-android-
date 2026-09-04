@@ -14,6 +14,7 @@
 const crypto = require("node:crypto");
 const { open } = require("./db");
 const { checkDocument, checkAmount } = require("./totals");
+const { checkJournal } = require("./accounting");
 
 /* Record collections, stored one row per record in `records`. */
 const FIELDS = [
@@ -343,7 +344,20 @@ function applyOperation(workspaceId, actor, operation) {
   if (UPSERT_FIELDS[op]) {
     const field = UPSERT_FIELDS[op];
     if (op === "transfer.correct") checkExpectedVersion(workspaceId, field, id, data);
-    putRecord(workspaceId, field, id, clientRecord(data) || rebuildSimple(id, data));
+    const record = clientRecord(data) || rebuildSimple(id, data);
+
+    // A journal entry that does not balance falsifies every report built on it,
+    // and nothing downstream would notice.
+    if (field === "journals") {
+      const problems = checkJournal(record);
+      if (problems.length) throw badRequest("That journal entry was refused: " + problems.join("; "));
+    }
+    if (field === "transfers") {
+      const problems = checkAmount(record, ["amount"]);
+      if (problems.length) throw badRequest("That transfer was refused: " + problems.join("; "));
+    }
+
+    putRecord(workspaceId, field, id, record);
     return;
   }
 
@@ -436,16 +450,9 @@ function applyOperation(workspaceId, actor, operation) {
     }
 
     case "stock.adjust": {
-      // The product record the app sent already carries the new quantity, so
-      // this is recorded for history rather than applied a second time.
-      open().prepare(
-        `INSERT INTO stock_ledger (id, workspace_id, branch_id, product_id, delta, reason, by_user, at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        id || crypto.randomUUID(), workspaceId,
-        String(data.branchId || ""), String(data.productId || ""),
-        Number(data.delta) || 0, String(data.reason || ""), actor.id, nowIso()
-      );
+      // The product record in the same batch already carries the new quantity,
+      // and applyOperations checks the two agree and writes the ledger entry.
+      // Nothing more to do here.
       return;
     }
 
@@ -581,11 +588,21 @@ function applyOperations(workspaceId, actor, operations) {
     assertBranchAllowed(actor, operation);
   }
 
+  // Stock is checked across the batch rather than per operation: the quantity
+  // arrives on the product record while the reason for it is a different
+  // operation in the same save.
+  const stock = require("./stock").checkAndPlan(workspaceId, actor, operations);
+  if (stock.problems.length) {
+    throw badRequest("That change to stock was refused: " + stock.problems.join("; "));
+  }
+
   let applied = 0;
   for (const operation of operations) {
     applyOperation(workspaceId, actor, operation);
     applied += 1;
   }
+
+  require("./stock").record(workspaceId, actor, stock.movements);
   return applied;
 }
 

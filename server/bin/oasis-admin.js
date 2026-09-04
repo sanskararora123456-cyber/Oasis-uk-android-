@@ -291,6 +291,39 @@ function backup(args) {
   if (gone.length) console.log("  removed " + gone.length + " older backup(s)");
 }
 
+/* Add the stock ledger up and compare it with what the products say. */
+function stockCheck(args) {
+  const workspace = findWorkspace(args.workspace);
+  const rows = require("../src/stock").reconcile(workspace.id);
+
+  const moves = open().prepare(
+    "SELECT COUNT(*) AS n FROM stock_ledger WHERE workspace_id = ?"
+  ).get(workspace.id).n;
+
+  console.log("Stock check for " + workspace.code);
+  console.log("  " + moves + " movements recorded");
+
+  if (!rows.length) {
+    console.log("  every product agrees with the ledger.");
+    return;
+  }
+
+  console.log("  " + rows.length + " product(s) disagree with the ledger:");
+  console.log("");
+  console.log("    " + "door".padEnd(28) + "branch".padEnd(38) + "app".padStart(8) + "ledger".padStart(10) + "diff".padStart(8));
+  for (const r of rows) {
+    console.log("    " + String(r.name || r.productId).slice(0, 27).padEnd(28) +
+      String(r.branchId).slice(0, 37).padEnd(38) +
+      String(r.app).padStart(8) + String(r.ledger).padStart(10) +
+      String(r.difference > 0 ? "+" + r.difference : r.difference).padStart(8));
+  }
+  console.log("");
+  console.log("  A difference means stock changed without a movement being recorded here.");
+  console.log("  Products that already existed before this server started counting will");
+  console.log("  show their opening quantity as a difference; that is expected once.");
+  process.exitCode = 1;
+}
+
 function listWorkspaces() {
   const rows = open().prepare("SELECT * FROM workspaces ORDER BY created_at").all();
   if (!rows.length) {
@@ -318,6 +351,7 @@ function usage() {
   console.log("  add-branch    --workspace OASIS --name \"...\" [--code GZB] [--city ...]");
   console.log("  set-branches  --workspace OASIS --name \"...\" --branches GZB,LONI   (or --all)");
   console.log("  backup        [--out DIR] [--keep 14] [--list]");
+  console.log("  stock-check   --workspace OASIS");
   console.log("  list-workspaces");
   console.log("");
   console.log("Roles: " + ROLES.join(", "));
@@ -331,6 +365,7 @@ const COMMANDS = {
   "add-branch": addBranch,
   "set-branches": setBranches,
   "backup": backup,
+  "stock-check": stockCheck,
   "list-workspaces": listWorkspaces,
 };
 

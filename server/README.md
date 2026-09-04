@@ -128,7 +128,14 @@ node bin/oasis-admin.js add-branch  --workspace OASIS --name "..." [--code GZB]
 node bin/oasis-admin.js set-branches --workspace OASIS --name "..." --branches GZB,LONI
 node bin/oasis-admin.js set-branches --workspace OASIS --name "..." --all
 node bin/oasis-admin.js backup [--out DIR] [--keep 14] [--list]
+node bin/oasis-admin.js stock-check --workspace OASIS
 ```
+
+`stock-check` adds up the stock ledger and compares it with what each product
+says it holds. They should agree; a difference means a quantity changed without a
+movement being recorded, which is worth looking into. Products that already
+existed before this server started counting will show their opening quantity as a
+difference once.
 
 `set-branches` restricts someone to certain branches: they are then sent only
 those branches' documents, payments, expenses and accounts, and cannot write into
@@ -283,6 +290,16 @@ real money.
   documents, payments, expenses, stock movements, transfers and accounts, is not
   told the other branches exist, and cannot write into them. They cannot widen
   their own branch list.
+- **Journal entries must balance.** Debits have to equal credits to within half a
+  rupee and actually move something, no line can be a debit and a credit at once,
+  amounts cannot be negative, and an entry needs a narration. An entry that does
+  not balance quietly falsifies every report built on it.
+- **Stock has to follow from something.** A quantity cannot change unless the same
+  save contains a reason for it — a purchase bill, credit note, purchase return,
+  delivery note, an incoming batch arriving, or a deliberate hand adjustment by
+  someone holding `adjust_stock`. Where a document accounts for the change, the
+  new quantity has to be exactly what that document implies. Stock can never go
+  negative. Every movement is written to `stock_ledger` with its reason.
 
 ### Not enforced — the honest list
 
@@ -290,9 +307,13 @@ real money.
   is the app's design, not a server choice: the sign-in screen accepts nothing
   else. Lockout and hashing make guessing impractical, but anyone who learns a
   PIN *is* that person. Treat PINs like keys to the shop.
-- **Journals and stock levels are still the app's.** Document totals are checked
-  here; the ledger postings and stock quantities that follow from them are not
-  independently re-derived.
+- **Reports are still the app's.** The profit and loss, balance sheet, ledgers and
+  ageing are worked out on the phone from records this server has checked. The
+  inputs are validated; the summaries built from them are not recomputed here.
+- **Stock is checked against the save, not replayed from history.** A change must
+  match the document that explains it, but the server does not re-derive every
+  quantity from the beginning of time on each save. `oasis-admin stock-check` does
+  that reconciliation on demand and reports anything that drifted.
 - **Last write wins** on most records. Payment, expense and transfer corrections
   carry a version and get a `409` if someone else got there first; everything else
   does not. Two people editing one customer at the same moment: the later save
@@ -348,7 +369,7 @@ Back up the database file first and the change is reversible.
 npm test
 ```
 
-60 checks against a real server on a throwaway database.
+81 checks against a real server on a throwaway database.
 
 `test/totals-parity.test.js` (3) lifts `calcTotals` out of the app's own HTML and
 runs it against the server's copy over 5,000 randomly shaped documents — 65,000
@@ -370,3 +391,10 @@ an admin is not obstructed.
 totalling, breaks the GST split, sends negative and non-finite amounts; reads and
 writes across branch boundaries as a restricted user; and takes a backup, checks
 its contents, restores it into a second server and signs in to it.
+
+`test/accounting.test.js` (21) posts unbalanced journal entries, entries that move
+nothing, negative debits and lines that are both sides at once; and tries to
+invent stock — claiming 500 doors from a bill for 5, a purchase return that adds
+stock, negative quantities, an adjustment without the permission for it — while
+checking the legitimate paths still work, including the difference between a
+delivery note that moves doors and one that does not.
