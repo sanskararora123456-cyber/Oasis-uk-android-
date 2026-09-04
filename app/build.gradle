@@ -1,0 +1,17 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.oasis.uksteeldoor'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'com.oasis.uksteeldoor'
+        minSdk 23
+        targetSdk 35
+        versionCode 85
+        versionName '8.5.0'
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core:1.15.0'
+}
