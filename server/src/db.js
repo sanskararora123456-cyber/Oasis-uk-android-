@@ -167,6 +167,23 @@ const MIGRATIONS = [
      ON record_history (workspace_id, field, record_id, version);
    CREATE INDEX IF NOT EXISTS history_by_time
      ON record_history (workspace_id, at);`,
+
+  // 5 — signed releases of the app's own screens.
+  //
+  // The whole interface is one HTML file inside the APK, so nearly every change
+  // to it can be delivered without building and sideloading a new APK onto every
+  // phone. The signature is what makes that safe: the app runs no bundle it
+  // cannot check against the key built into it.
+  `CREATE TABLE IF NOT EXISTS app_releases (
+     version     INTEGER PRIMARY KEY,
+     bundle      TEXT NOT NULL,
+     sha256      TEXT NOT NULL,
+     signature   TEXT NOT NULL,
+     key_id      TEXT NOT NULL DEFAULT '',
+     notes       TEXT NOT NULL DEFAULT '',
+     published   INTEGER NOT NULL DEFAULT 0,
+     created_at  TEXT NOT NULL
+   );`,
 ];
 
 /* A copy of the database exactly as it was before any migration runs.

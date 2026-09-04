@@ -736,6 +736,112 @@ function change(args) {
   console.log("");
 }
 
+/* --------------------- shipping new screens to the phones ------------------- */
+
+function appCommand(args) {
+  const what = String(args._[1] || "list").trim();
+  const dist = require("../src/appdist");
+  const fsx = require("node:fs");
+
+  if (what === "keygen") {
+    const out = String(args.out || "oasis-app-signing.key");
+    if (fsx.existsSync(out)) die("'" + out + "' already exists. Moving the old key aside is a decision, not an accident.");
+
+    const { publicKey, privateKey, keyId } = dist.generateKeyPair();
+    fsx.writeFileSync(out, privateKey, { mode: 0o600 });
+
+    const pub = dist.publicKeyForApp(publicKey);
+    const asset = path.join(__dirname, "..", "..", "app", "src", "main", "assets", "update-key.pub");
+    fsx.writeFileSync(asset, pub + "\n");
+
+    console.log("Made a signing key.");
+    console.log("");
+    console.log("  private key : " + path.resolve(out) + "   (key id " + keyId + ")");
+    console.log("  public key  : written to app/src/main/assets/update-key.pub");
+    console.log("");
+    console.log("Keep the private key somewhere safe and off this server if you can —");
+    console.log("anyone holding it can put code on the phones. It is not stored here.");
+    console.log("");
+    console.log("Now build the APK once more so the phones carry the public key, and");
+    console.log("install it. After that, new screens go out with `app release`, and");
+    console.log("no more APKs unless something changes outside index.html.");
+    return;
+  }
+
+  if (what === "release") {
+    const bundle = String(args.file ||
+      path.join(__dirname, "..", "..", "app", "src", "main", "assets", "index.html"));
+    const key = String(args.key || "oasis-app-signing.key");
+    if (!fsx.existsSync(key)) die("No signing key at '" + key + "'. Run `app keygen` first.");
+
+    let made;
+    try {
+      made = dist.addRelease(bundle, key, args.notes);
+    } catch (err) {
+      die(err.message);
+    }
+    console.log("Stored release " + made.version + " (" + Math.round(made.bytes / 1024) + " KB, signed by " + made.keyId + ")");
+    console.log("  " + made.sha256);
+    console.log("");
+    console.log("Nothing has changed on anyone's phone yet. To send it out:");
+    console.log("  node bin/oasis-admin.js app publish --version " + made.version);
+    return;
+  }
+
+  if (what === "publish") {
+    const version = Number(args.version);
+    if (!version) die("Give --version. `app list` shows what there is.");
+    try {
+      dist.publish(version);
+    } catch (err) {
+      die(err.message);
+    }
+    console.log("Release " + version + " is now what the phones will pick up.");
+    console.log("They fetch it when the app next starts, and use it the time after that.");
+    console.log("");
+    console.log("If it turns out to be wrong, publish the previous version — or run");
+    console.log("`app rollback`, which does the same thing.");
+    return;
+  }
+
+  if (what === "rollback") {
+    const all = dist.releases().filter((r) => !r.published);
+    if (!all.length) die("There is no earlier release to go back to.");
+    dist.publish(all[0].version);
+    console.log("Back to release " + all[0].version + ".");
+    console.log("Phones pick it up on their next start. A phone whose copy fails to");
+    console.log("start falls back to the screens built into the APK on its own.");
+    return;
+  }
+
+  if (what === "off") {
+    dist.unpublishAll();
+    console.log("No release is published. Every phone goes back to the screens built");
+    console.log("into its APK the next time it starts.");
+    return;
+  }
+
+  const all = dist.releases();
+  if (!all.length) {
+    console.log("No releases yet.");
+    console.log("");
+    console.log("  node bin/oasis-admin.js app keygen                 once, ever");
+    console.log("  node bin/oasis-admin.js app release --notes \"...\"  after editing index.html");
+    console.log("  node bin/oasis-admin.js app publish --version 1    send it out");
+    return;
+  }
+  console.log("");
+  console.log("App releases:");
+  for (const r of all) {
+    console.log("  " + (r.published ? "-> " : "   ") + String(r.version).padEnd(4) +
+      r.created_at.slice(0, 16).replace("T", " ") + "  " +
+      String(Math.round(r.bytes / 1024) + " KB").padStart(8) + "  " + (r.notes || ""));
+  }
+  console.log("");
+  console.log("  -> is what the phones are using.");
+  console.log("");
+}
+
 function listWorkspaces() {
   const rows = open().prepare("SELECT * FROM workspaces ORDER BY created_at").all();
   if (!rows.length) {
@@ -781,6 +887,14 @@ function usage() {
   console.log("  change plan   --workspace OASIS --id ID          what it would do (writes nothing)");
   console.log("  change apply  --workspace OASIS --id ID --confirm do it");
   console.log("  change undo   --workspace OASIS --id ID --confirm put it back");
+  console.log("");
+  console.log("Shipping new screens to the phones (no APK):");
+  console.log("  app keygen                                       once, ever");
+  console.log("  app release  [--file index.html] [--notes \"...\"]  sign and store");
+  console.log("  app publish  --version N                         send it out");
+  console.log("  app rollback                                     go back one");
+  console.log("  app list                                         what exists");
+  console.log("  app off                                          back to the built-in screens");
   console.log("  list-workspaces");
   console.log("");
   console.log("Roles: " + ROLES.join(", "));
@@ -802,6 +916,7 @@ const COMMANDS = {
   "what-changed": whatChanged,
   "clone": clone,
   "change": change,
+  "app": appCommand,
   "enable-2fa": (a) => twoFactor(a, true),
   "disable-2fa": (a) => twoFactor(a, false),
   "list-workspaces": listWorkspaces,

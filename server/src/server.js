@@ -291,6 +291,30 @@ function handleReport(req, res) {
   sendJson(res, 200, report);
 }
 
+/* The app asking whether there is a newer set of screens. No sign-in: the bundle
+   is the same code already inside the APK, and its signature is what protects
+   it. Serving it to anyone who asks costs nothing. */
+function handleAppManifest(req, res) {
+  sendJson(res, 200, require("./appdist").manifest());
+}
+
+function handleAppBundle(req, res) {
+  const url = new URL(req.url, "http://placeholder");
+  const row = require("./appdist").bundleFor(url.searchParams.get("version"));
+  if (!row) throw new HttpError(404, "No app release has been published");
+
+  const body = Buffer.from(row.bundle, "utf8");
+  res.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Length": body.length,
+    "Cache-Control": "no-store",
+    "X-Oasis-Version": String(row.version),
+    "X-Oasis-Sha256": row.sha256,
+    "X-Oasis-Signature": row.signature,
+  });
+  res.end(body);
+}
+
 function handleHealth(req, res) {
   const replica = require("./replica").status();
   // A stale replica is worth failing a health check over: whatever is watching
@@ -315,6 +339,8 @@ const ROUTES = [
   { method: "GET", path: "/v1/client/bootstrap", handler: handleBootstrap },
   { method: "POST", path: "/v1/client/operations", handler: handleOperations },
   { method: "GET", path: "/v1/reports/summary", handler: handleReport },
+  { method: "GET", path: "/v1/app/manifest", handler: handleAppManifest },
+  { method: "GET", path: "/v1/app/bundle", handler: handleAppBundle },
 ];
 
 async function route(req, res) {

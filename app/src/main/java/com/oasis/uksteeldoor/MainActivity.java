@@ -2,6 +2,8 @@ package com.oasis.uksteeldoor;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.Context;
+import android.content.SharedPreferences;
 import android.app.DownloadManager;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
@@ -29,6 +31,7 @@ import java.io.File;
 
 public class MainActivity extends Activity {
     private WebView webView;
+    private UiBundle ui;
     private final Map<String, String> memoryStore = new ConcurrentHashMap<>();
     private ValueCallback<Uri[]> fileCallback;
     private static final int FILE_PICKER = 9001;
@@ -43,7 +46,19 @@ public class MainActivity extends Activity {
         webView = new WebView(this);
         setContentView(webView);
         configureWebView();
-        webView.loadUrl("file:///android_asset/index.html");
+
+        // Which copy of the screens this launch uses: the one built into the
+        // APK, or a newer one the server has published and this device has
+        // already fetched and checked. Always loaded from the same address, so
+        // the page keeps its saved settings either way.
+        ui = new UiBundle(this);
+        ui.prepare();
+        if (ui.servedFile().exists()) {
+            webView.loadUrl(ui.servedUrl());
+        } else {
+            // Nothing could be written to storage; the built-in screens still work.
+            webView.loadUrl("file:///android_asset/index.html");
+        }
     }
 
     private void configureWebView() {
@@ -140,8 +155,39 @@ public class MainActivity extends Activity {
         @JavascriptInterface public void clear(){memoryStore.clear();}
         @JavascriptInterface public void print(){runOnUiThread(()->printCurrentPage());}
         @JavascriptInterface public String appVersion(){return "8.5.0-secure";}
+
+        /* The page saying it drew itself. Until this arrives, a newly fetched
+           set of screens is on trial: if the app is started again without it,
+           that copy is thrown away and the built-in screens come back. It is
+           what stops a bad release leaving the shop unable to open the app. */
+        @JavascriptInterface public void bootOk(){ if (ui != null) ui.bootSucceeded(); }
+
+        /* Ask whether the server has newer screens. Nothing changes underneath
+           anyone: a new copy is used from the next start. */
+        @JavascriptInterface public void checkForUpdate(String serverUrl){
+            if (ui != null) ui.checkInBackground(serverUrl);
+        }
+
+        @JavascriptInterface public int uiVersion(){ return ui == null ? 0 : ui.activeVersion(); }
+        @JavascriptInterface public boolean updatesEnabled(){ return ui != null && ui.updatesEnabled(); }
+
+        /* Somewhere for the page to keep the server address and workspace code.
+           Not business data — that stays memory-only — but settings that should
+           survive the page being reloaded from a different file. */
+        @JavascriptInterface public String getPref(String key){
+            if (key == null) return null;
+            return prefs().getString("p:" + key, null);
+        }
+        @JavascriptInterface public void setPref(String key, String value){
+            if (key == null) return;
+            SharedPreferences.Editor e = prefs().edit();
+            if (value == null) e.remove("p:" + key); else e.putString("p:" + key, value);
+            e.apply();
+        }
     }
 
     @Override public void onBackPressed(){ if(webView.canGoBack()) webView.goBack(); else super.onBackPressed(); }
+    private SharedPreferences prefs(){ return getSharedPreferences("oasis-app", Context.MODE_PRIVATE); }
+
     @Override protected void onDestroy(){ if(webView!=null) webView.destroy(); super.onDestroy(); }
 }

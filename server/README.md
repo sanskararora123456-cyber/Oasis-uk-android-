@@ -148,6 +148,13 @@ node bin/oasis-admin.js change list
 node bin/oasis-admin.js change plan  --workspace OASIS --id <change id>
 node bin/oasis-admin.js change apply --workspace OASIS --id <change id> --confirm
 node bin/oasis-admin.js change undo  --workspace OASIS --id <change id> --confirm
+
+# shipping new screens to the phones without an APK — see the section below
+node bin/oasis-admin.js app keygen
+node bin/oasis-admin.js app release --notes "..."
+node bin/oasis-admin.js app publish --version N
+node bin/oasis-admin.js app rollback
+node bin/oasis-admin.js app list
 ```
 
 `stock-check` adds up the stock ledger and compares it with what each product
@@ -268,9 +275,67 @@ on `users`, a new table — append to `MIGRATIONS` in `src/db.js`. The server co
 the database into `pre-migration/` before running one, and refuses to migrate if
 that copy cannot be taken.
 
+### Shipping new screens without an APK
+
+The whole interface is one HTML file, so nearly every change to the app is a
+change to that file — and it does not need a new APK on every phone.
+
+Set up once, ever:
+
+```bash
+node bin/oasis-admin.js app keygen        # writes the private key, and the
+                                          # public key into the app's assets
+```
+
+Then build and install the APK **one** more time, so the phones carry the public
+key. After that:
+
+```bash
+# edit app/src/main/assets/index.html, then
+node bin/oasis-admin.js app release --notes "New credit limit field"
+node bin/oasis-admin.js app publish --version 3
+```
+
+Each phone fetches it the next time the app starts, checks it, and uses it the
+time after. Nothing is swapped in underneath someone mid-job.
+
+```bash
+node bin/oasis-admin.js app list          # what exists, and what is live
+node bin/oasis-admin.js app rollback      # publish the previous one again
+node bin/oasis-admin.js app off           # everyone back to the built-in screens
+```
+
+**What keeps this from being reckless:**
+
+- **Off unless you turn it on.** With no `update-key.pub` in the APK there is no
+  key to check against and nothing is ever fetched. A build without one behaves
+  exactly as it always did.
+- **Signed.** A bundle must carry an RSA signature from the matching private key,
+  over bytes whose SHA-256 also matches. Keep the private key off this server if
+  you can: whoever holds the server can then serve a bundle, but cannot make a
+  phone run it.
+- **It can always go back.** The screens built into the APK are never deleted. A
+  downloaded bundle is on trial until it has started once and told the app so; if
+  it fails to start, the next launch throws it away and uses the built-in screens.
+  That is the case that matters — a bundle that works on a desktop but not on an
+  older WebView would otherwise leave the shop unable to open the app.
+- **Storing is not sending.** `release` stores and signs; `publish` is the
+  separate step that puts it on the phones.
+
+An APK is still needed for anything outside that file: a new Android permission,
+a change to the manifest, or to the Java. Those are rare.
+
+**Not yet run on a real phone.** The server half is covered by
+`test/appdist.test.js`, including refusing a bundle that was altered after
+signing or signed by a different key, and the Android half is written to fail
+towards the built-in screens at every step. But it has not been through an
+install-and-update cycle on a handset. Do that once, on one phone, before relying
+on it for the others.
+
 ### Rolling back
 
-- **the app** — install the previous APK; the server serves both
+- **the app's screens** — `app rollback`, or `app off`
+- **the app itself** — install the previous APK; the server serves both
 - **the server** — put the previous version back and restart; nothing about the
   data changes
 - **a data change** — `change undo`
@@ -688,7 +753,7 @@ Back up the database file first and the change is reversible.
 npm test
 ```
 
-138 checks against a real server on a throwaway database.
+153 checks against a real server on a throwaway database.
 
 `test/totals-parity.test.js` (3) lifts `calcTotals` out of the app's own HTML and
 runs it against the server's copy over 5,000 randomly shaped documents — 65,000
@@ -717,6 +782,11 @@ invent stock — claiming 500 doors from a bill for 5, a purchase return that ad
 stock, negative quantities, an adjustment without the permission for it — while
 checking the legitimate paths still work, including the difference between a
 delivery note that moves doors and one that does not.
+
+`test/appdist.test.js` (15) covers shipping new screens: signing a release,
+that storing is not publishing, that what is served hashes and verifies to what
+was signed, and that a bundle altered after signing or signed by a different key
+is refused — which is what stops a compromised server putting code on a phone.
 
 `test/change.test.js` (17) covers making a change to software already in use:
 that a new field needs no migration and old and new records coexist, that an

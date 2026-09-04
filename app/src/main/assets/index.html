@@ -23314,12 +23314,26 @@ const blankSync = () => ({
    what lets saving work — every caller reaches the server through loadSync(),
    and a token read back from storage would be a token written to disk. */
 const SESSION = { token: "", refreshToken: "" };
+/* The Android shell, when the app is running inside it. */
+const NATIVE = (typeof window !== "undefined" && window.OasisAndroid) ? window.OasisAndroid : null;
+/* Settings are kept by the shell where there is one, because the page can be
+   reloaded from a different file when the screens are updated, and anything
+   held only in the browser's own storage would not survive that. Business data
+   is unaffected: it stays memory-only and lives on the server. */
+const readSetting = (key) => {
+    try { if (NATIVE && NATIVE.getPref) { const v = NATIVE.getPref(key); if (v != null) return v; } } catch (_) {}
+    try { return window.localStorage ? window.localStorage.getItem(key) : null; } catch (_) { return null; }
+};
+const writeSetting = (key, value) => {
+    try { if (NATIVE && NATIVE.setPref) NATIVE.setPref(key, value); } catch (_) {}
+    try { if (window.localStorage) window.localStorage.setItem(key, value); } catch (_) {}
+};
 async function loadSync() {
     if (!SECURE_SERVER_MODE) return loadKey(SYNC_KEY, blankSync());
     try {
         // Only non-secret connection metadata is persisted. Access/refresh tokens
         // are deliberately memory-only and disappear when the app process ends.
-        const raw = typeof window !== "undefined" ? window.localStorage?.getItem(SYNC_KEY) : null;
+        const raw = readSetting(SYNC_KEY);
         if (!raw) return { ...blankSync(), token: SESSION.token, refreshToken: SESSION.refreshToken };
         const parsed = JSON.parse(raw) || {};
         return { ...blankSync(), url: String(parsed.url || ""), workspace: String(parsed.workspace || ""), deviceLabel: String(parsed.deviceLabel || ""), user: String(parsed.user || ""), version: Number(parsed.version || 0), lastPull: parsed.lastPull || "", lastPush: parsed.lastPush || "", auto: !!parsed.auto, token: SESSION.token, refreshToken: SESSION.refreshToken };
@@ -23331,7 +23345,7 @@ async function saveSync(cfg) {
     if (cfg && Object.prototype.hasOwnProperty.call(cfg, "refreshToken")) SESSION.refreshToken = cfg.refreshToken || "";
     const safe = { ...blankSync(), ...cfg, token: "", refreshToken: "" };
     delete safe.token; delete safe.refreshToken;
-    try { if (typeof window !== "undefined" && window.localStorage) window.localStorage.setItem(SYNC_KEY, JSON.stringify(safe)); } catch (_) {}
+    writeSetting(SYNC_KEY, JSON.stringify(safe));
     return true;
 }
 
@@ -25573,6 +25587,22 @@ function VoucherScreen({ core, setScreen, kind, id, branch, me }) {
   try {
     var root = ReactDOMClient.createRoot(document.getElementById("root"));
     root.render(React.createElement(OasisApp));
+
+    // Tell the Android shell the screens drew themselves. A newly fetched copy
+    // is on trial until this arrives: if the app is opened again without it,
+    // that copy is discarded and the screens built into the APK come back. It
+    // is what stops a bad release leaving the shop unable to open the app.
+    setTimeout(function () {
+      try { if (window.OasisAndroid && window.OasisAndroid.bootOk) window.OasisAndroid.bootOk(); } catch (e) {}
+      // And ask whether there is a newer set of screens. Anything found is used
+      // from the next start, never swapped in mid-use.
+      try {
+        if (window.OasisAndroid && window.OasisAndroid.checkForUpdate) {
+          var saved = JSON.parse(window.OasisAndroid.getPref("oasis:sync") || "{}");
+          if (saved && saved.url) window.OasisAndroid.checkForUpdate(saved.url);
+        }
+      } catch (e) {}
+    }, 1500);
   } catch (err) {
     document.getElementById("root").innerHTML =
       '<div id="boot">This page could not start.<br><br><code style="font-size:12px">' +
