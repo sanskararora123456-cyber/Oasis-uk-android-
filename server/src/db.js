@@ -138,6 +138,10 @@ const MIGRATIONS = [
   // 2 — which branches a person may work in. Empty means all of them, which is
   // how the app reads it too, so existing staff keep the access they had.
   `ALTER TABLE users ADD COLUMN branches TEXT NOT NULL DEFAULT '[]';`,
+
+  // 3 — an optional second factor. Off for everyone until it is turned on, so
+  // nobody is locked out by the upgrade.
+  `ALTER TABLE users ADD COLUMN totp_secret TEXT NOT NULL DEFAULT '';`,
 ];
 
 function migrate(d) {

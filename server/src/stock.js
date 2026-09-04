@@ -59,6 +59,34 @@ const stockIn = (product, branchId) => {
   return num(map[branchId]);
 };
 
+/* What the ledger says a product holds in one branch. */
+function ledgerBalance(workspaceId, productId, branchId) {
+  const row = open().prepare(
+    "SELECT SUM(delta) AS total FROM stock_ledger WHERE workspace_id = ? AND product_id = ? AND branch_id = ?"
+  ).get(workspaceId, String(productId), String(branchId || ""));
+  return num(row && row.total);
+}
+
+function hasLedger(workspaceId, productId) {
+  const row = open().prepare(
+    "SELECT 1 AS yes FROM stock_ledger WHERE workspace_id = ? AND product_id = ? LIMIT 1"
+  ).get(workspaceId, String(productId));
+  return !!row;
+}
+
+/* Give products that existed before the ledger did an opening movement, so the
+   ledger and the record agree from that point on. Without this, every product
+   already in a live database would look like it had appeared from nowhere. */
+function backfillOpening(workspaceId, productId, product, actor) {
+  const map = product && typeof product.stockBy === "object" && product.stockBy ? product.stockBy : {};
+  const rows = [];
+  for (const [branchId, value] of Object.entries(map)) {
+    if (num(value)) rows.push({ productId, branchId, delta: num(value), reason: "opening_backfill" });
+  }
+  if (rows.length) record(workspaceId, actor, rows);
+  return rows.length;
+}
+
 const docOf = (data) => (data && typeof data.client === "object" && data.client ? data.client : data) || {};
 
 /* What this batch of operations says should happen to stock. */
@@ -156,6 +184,10 @@ function checkAndPlan(workspaceId, actor, operations) {
       continue;
     }
 
+    // A product from before the ledger existed gets an opening movement, once,
+    // so that from here on the ledger and the record can be held to agreeing.
+    if (!hasLedger(workspaceId, id)) backfillOpening(workspaceId, id, before, actor);
+
     const branches = new Set([
       ...Object.keys((before && before.stockBy) || {}),
       ...Object.keys(nextMap || {}),
@@ -164,6 +196,19 @@ function checkAndPlan(workspaceId, actor, operations) {
     for (const branchId of branches) {
       const was = stockIn(before, branchId);
       const now = stockIn({ stockBy: nextMap || {} }, branchId);
+
+      // The ledger is the authority. If the stored record has drifted from the
+      // sum of its movements, something changed stock without going through
+      // here, and carrying on would build on a figure nobody can account for.
+      const fromLedger = ledgerBalance(workspaceId, id, branchId);
+      if (Math.abs(fromLedger - was) > 0.0001) {
+        problems.push(
+          name + " holds " + was + " on record but its movements add up to " + fromLedger +
+          " — run stock-check before changing it"
+        );
+        continue;
+      }
+
       const actual = now - was;
       if (!actual) continue;
 

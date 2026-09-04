@@ -93,6 +93,7 @@ function readUsers(workspaceId) {
       active: !!row.active,
       _v: row.version,
       hasPin: !!row.pin_hash,
+      twoFactor: !!row.totp_secret,
     };
   });
 }
@@ -308,6 +309,48 @@ function checkExpectedVersion(workspaceId, field, id, data) {
     throw conflict("Someone else changed this entry on another device. Reopen it and try again.");
   }
 }
+
+/* Every record carries the version it was read at, as `_v`. If the stored copy
+   has moved on since, someone else edited it from another device and this save
+   would quietly overwrite their work — so it is refused instead.
+
+   A record with no `_v` is one being created, and a record the server has never
+   seen has nothing to conflict with. The whole batch is checked before any of it
+   is applied, so a conflict on one record cannot half-save the rest. */
+function assertNotStale(workspaceId, field, id, record, label) {
+  const claimed = Number(record && record._v);
+  if (!Number.isFinite(claimed) || claimed <= 0) return;
+
+  const row = open().prepare(
+    "SELECT version FROM records WHERE workspace_id = ? AND field = ? AND id = ?"
+  ).get(workspaceId, field, id);
+  if (!row) return;
+
+  if (row.version !== claimed) {
+    throw conflict(
+      "Someone else changed " + (label || "this") +
+      " on another device while you were working on it. Open it again to see their version, then redo your change."
+    );
+  }
+}
+
+/* What to call a record in a conflict message. */
+const FIELD_LABEL = {
+  parties: "this customer or supplier",
+  products: "this door",
+  docs: "this document",
+  payments: "this payment",
+  expenses: "this expense",
+  transfers: "this transfer",
+  journals: "this journal entry",
+  branches: "this branch",
+  accounts: "this account",
+  companies: "this firm",
+  categories: "this product type",
+  templates: "this template",
+  supply: "this incoming batch",
+  commitments: "this reservation",
+};
 
 /* Simple record collections: the app sends the whole record, we keep it. */
 const UPSERT_FIELDS = {
@@ -577,6 +620,31 @@ function assertBranchAllowed(actor, operation) {
   }
 }
 
+/* Which collection an operation writes to, for the staleness check. */
+function fieldForOperation(op, data) {
+  if (UPSERT_FIELDS[op]) return UPSERT_FIELDS[op];
+  if (op === "document.create") return "docs";
+  if (op === "payment.create" || op === "payment.correct") return "payments";
+  if (op === "expense.create" || op === "expense.correct") return "expenses";
+  if (op === "metadata.upsert") return METADATA_FIELDS[String((data && data.type) || "")] || "";
+  return "";
+}
+
+function assertBatchNotStale(workspaceId, operations) {
+  for (const operation of operations) {
+    const op = String(operation.op || "");
+    // The activity log only ever grows, so it cannot conflict.
+    if (op === "audit.append") continue;
+
+    const data = operation.data && typeof operation.data === "object" ? operation.data : {};
+    const field = fieldForOperation(op, data);
+    if (!field) continue;
+
+    const record = clientRecord(data) || (op === "metadata.upsert" ? data.payload : data);
+    assertNotStale(workspaceId, field, String(operation.id || ""), record, FIELD_LABEL[field]);
+  }
+}
+
 function applyOperations(workspaceId, actor, operations) {
   const { assertAllowed } = require("./permissions");
 
@@ -587,6 +655,8 @@ function applyOperations(workspaceId, actor, operations) {
     assertAllowed(workspaceId, actor, operation);
     assertBranchAllowed(actor, operation);
   }
+
+  assertBatchNotStale(workspaceId, operations);
 
   // Stock is checked across the batch rather than per operation: the quantity
   // arrives on the product record while the reason for it is a different

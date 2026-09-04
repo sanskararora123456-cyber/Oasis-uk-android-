@@ -100,6 +100,8 @@ Everything is an environment variable; nothing secret is in the repository.
 | `OASIS_BACKUP_EVERY_HOURS` | `0` (off) | Back up automatically on this interval |
 | `OASIS_BACKUP_DIR` | `./backups` | Where backups are written |
 | `OASIS_BACKUP_KEEP` | `14` | How many to keep before deleting the oldest |
+| `OASIS_REPLICA_PATH` | off | Keep a live standby copy here (another disk or machine) |
+| `OASIS_REPLICA_EVERY_SECONDS` | `60` | How often to refresh the standby |
 
 Set `OASIS_JWT_SECRET` in production:
 
@@ -129,6 +131,9 @@ node bin/oasis-admin.js set-branches --workspace OASIS --name "..." --branches G
 node bin/oasis-admin.js set-branches --workspace OASIS --name "..." --all
 node bin/oasis-admin.js backup [--out DIR] [--keep 14] [--list]
 node bin/oasis-admin.js stock-check --workspace OASIS
+node bin/oasis-admin.js report      --workspace OASIS [--parties] [--from ...] [--to ...]
+node bin/oasis-admin.js enable-2fa  --workspace OASIS --name "..."
+node bin/oasis-admin.js disable-2fa --workspace OASIS --name "..."
 ```
 
 `stock-check` adds up the stock ledger and compares it with what each product
@@ -150,6 +155,52 @@ PINs are 8–12 digits, stored as a scrypt hash. They cannot be read back — if
 is forgotten, `reset-pin` issues a new one and signs that person's devices out.
 
 ---
+
+## Two-factor sign-in
+
+Worth turning on for anyone who can change staff access or see cost prices.
+
+```bash
+node bin/oasis-admin.js enable-2fa --workspace OASIS --name "Sanskar"
+```
+
+That prints a set-up key and an `otpauth://` link. Add either to Google
+Authenticator, Authy or 1Password — paste the key, or turn the link into a QR
+code and scan it. The command also prints the code the app should be showing
+right then, so you can check it matches before relying on it.
+
+From then on that person types their PIN and then the six-digit code into the
+**Authenticator code** box on the sign-in screen. Everyone else leaves that box
+empty.
+
+The key is not stored anywhere readable. If someone loses their phone, run the
+command again to issue a new one; `disable-2fa` turns it off entirely. Either
+way their other devices are signed out immediately.
+
+## The books, worked out here
+
+The server derives the figures itself, from records it has already checked, so
+there is a set of numbers that does not depend on any phone:
+
+```bash
+node bin/oasis-admin.js report --workspace OASIS --parties
+node bin/oasis-admin.js report --workspace OASIS --from 2026-04-01 --to 2027-03-31
+```
+
+Sales, purchases, expenses, gross and net profit, GST on sales, cash and bank
+balances, what customers owe and what you owe suppliers, receivables bucketed by
+how overdue they are, and a trial balance across every journal entry.
+
+The same thing is available to the app's own staff over HTTP at
+`GET /v1/reports/summary` (`?branch=`, `?from=`, `?to=`), which needs
+`see_reports`; cost prices and profit are left out for anyone without
+`see_costs`.
+
+The definitions are the app's own — an invoice raises what a customer owes, a
+credit note lowers it, money in settles receivables — so the two are directly
+comparable. **Where they disagree, that is worth looking into rather than
+assuming either is right.** The point of computing them twice is that a
+disagreement is visible at all.
 
 ## Backups
 
@@ -188,6 +239,43 @@ the drive failing. Copy them somewhere else — nightly is fine:
 ```bash
 0 2 * * *  rsync -a /var/lib/oasis/backups/ user@elsewhere:/backups/oasis/
 ```
+
+## A standby copy
+
+Backups every few hours cover a mistake. They are thin comfort at four on a
+Friday when the disk dies and the last one is from lunchtime. Point
+`OASIS_REPLICA_PATH` at another disk, or at a mount from another machine, and a
+complete copy is written there every minute:
+
+```bash
+OASIS_REPLICA_PATH=/mnt/standby/oasis.db OASIS_REPLICA_EVERY_SECONDS=60 npm start
+```
+
+The copy is written under a temporary name and renamed into place, so whoever
+picks it up gets a whole database and never one caught mid-write. It is opened
+and integrity-checked before it replaces the last good one, and `/health` reports
+how fresh it is — returning 503 if it falls more than three intervals behind, so
+whatever watches the service notices before you need it.
+
+**Switching over** is manual, and takes about two minutes:
+
+```bash
+sudo systemctl stop oasis-server          # if the old machine still answers
+sudo cp /mnt/standby/oasis.db /var/lib/oasis/oasis.db
+sudo chown oasis:oasis /var/lib/oasis/oasis.db
+sudo systemctl start oasis-server         # on the standby machine
+```
+
+Then point the domain at the new machine. Everyone signs in again, and you lose
+at most the last minute of work.
+
+Be clear about what this is not: nothing here notices the main machine has died,
+and nothing moves traffic on its own. Automatic failover needs a load balancer or
+DNS failover deciding which machine is live. That is a hosting choice; this gives
+you the current data to fail over *to*, which is the part that has to exist first.
+
+`test/hardening.test.js` promotes a standby copy into a second server and signs
+in to it, so this path is exercised rather than hoped for.
 
 ### Restoring
 
@@ -299,42 +387,39 @@ real money.
   delivery note, an incoming batch arriving, or a deliberate hand adjustment by
   someone holding `adjust_stock`. Where a document accounts for the change, the
   new quantity has to be exactly what that document implies. Stock can never go
-  negative. Every movement is written to `stock_ledger` with its reason.
+  negative.
+- **The stock ledger is the authority.** Every movement is recorded with its
+  reason, and before a quantity is changed the stored figure is checked against
+  the sum of that product's movements. If they have drifted apart — something
+  altered stock without going through this server — the save is refused rather
+  than built on a number nobody can account for.
+- **No save silently overwrites another.** Every record carries the version it was
+  read at. If the stored copy has moved on because someone else edited it from
+  another device, the save is refused with a `409` and a message saying so,
+  instead of quietly replacing their work. The whole batch is checked first, so a
+  conflict on one record cannot half-save the rest.
+- **A second factor, where you want one.** Any account can be given a six-digit
+  authenticator code on top of its PIN (see below). The code is checked after the
+  PIN, so a wrong PIN never reveals whether an account has one.
 
 ### Not enforced — the honest list
 
-- **A PIN is the only credential.** Eight to twelve digits, no second factor. That
-  is the app's design, not a server choice: the sign-in screen accepts nothing
-  else. Lockout and hashing make guessing impractical, but anyone who learns a
-  PIN *is* that person. Treat PINs like keys to the shop.
-- **Reports are still the app's.** The profit and loss, balance sheet, ledgers and
-  ageing are worked out on the phone from records this server has checked. The
-  inputs are validated; the summaries built from them are not recomputed here.
-- **Stock is checked against the save, not replayed from history.** A change must
-  match the document that explains it, but the server does not re-derive every
-  quantity from the beginning of time on each save. `oasis-admin stock-check` does
-  that reconciliation on demand and reports anything that drifted.
-- **Last write wins** on most records. Payment, expense and transfer corrections
-  carry a version and get a `409` if someone else got there first; everything else
-  does not. Two people editing one customer at the same moment: the later save
-  wins silently.
-- **An access token cannot be withdrawn early.** Signing someone out or changing
-  their PIN kills their refresh token immediately, but an access token already
-  issued stays valid until it expires — up to 30 minutes. Lower `OASIS_ACCESS_TTL`
-  if that window matters to you.
-- **One machine.** Backups are automatic and verified (below), so a dead disk
-  costs you the time since the last one — but there is no second machine to take
-  over. Real failover means running a standby, which is a hosting decision, not a
-  change to this code.
+- **A PIN is still the default.** Two-factor is available and worth turning on for
+  admins, but it is off until you enable it, and the app's sign-in offers nothing
+  richer than a PIN and a code. Anyone who learns both *is* that person.
+- **An access token cannot be withdrawn early.** Signing someone out, changing a
+  PIN or enabling two-factor kills the refresh token immediately, but an access
+  token already issued stays valid until it expires — up to 30 minutes. Lower
+  `OASIS_ACCESS_TTL` if that window matters to you.
+- **Failover is not automatic.** There is a live standby copy (below) and
+  promoting it takes a couple of minutes, but nothing notices the main machine has
+  died or moves traffic on its own. That needs something in front deciding which
+  machine is live, which is a hosting decision rather than a change to this code.
+- **The app draws its own screens.** The server now works the books out
+  independently and will tell you what it makes of them, but the figures on the
+  phone are still the phone's arithmetic. Where the two disagree, compare them —
+  that is what the report is for.
 - **No file or photo storage.** Document images stay on the device.
-
-### If you want it stronger
-
-In rough order of value for the effort: add versions to every record so no save is
-ever silently overwritten; re-derive journal postings and stock from documents; a
-second factor for admin accounts; a standby machine. Each is a contained change —
-the permission and totals layers, and the tests around them, are the pattern to
-follow.
 
 ### Keeping the arithmetic in step
 
@@ -369,7 +454,7 @@ Back up the database file first and the change is reversible.
 npm test
 ```
 
-81 checks against a real server on a throwaway database.
+106 checks against a real server on a throwaway database.
 
 `test/totals-parity.test.js` (3) lifts `calcTotals` out of the app's own HTML and
 runs it against the server's copy over 5,000 randomly shaped documents — 65,000
@@ -398,3 +483,12 @@ invent stock — claiming 500 doors from a bill for 5, a purchase return that ad
 stock, negative quantities, an adjustment without the permission for it — while
 checking the legitimate paths still work, including the difference between a
 delivery note that moves doors and one that does not.
+
+`test/hardening.test.js` (25) has a second device save over a record someone else
+already changed and requires a 409 with the first person's work intact; turns a
+second factor on and tries a missing code, a wrong one, a stale one and one from
+the window either side; checks the server's own receivables, credit notes,
+ageing buckets and trial balance, and that a salesman cannot read any of it;
+tampers with a stored quantity behind the server's back and requires the drift to
+be caught; and writes a standby copy, promotes it into a second server and signs
+in to it.

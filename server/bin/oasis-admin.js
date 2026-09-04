@@ -174,7 +174,8 @@ function listUsers(args) {
       "  " + u.name.padEnd(24) +
       u.role.padEnd(12) +
       (u.active ? "active " : "off    ") +
-      (u.hasPin ? "PIN set" : "NO PIN")
+      (u.hasPin ? "PIN set" : "NO PIN") +
+      (u.twoFactor ? "  2FA" : "")
     );
   }
 }
@@ -324,6 +325,116 @@ function stockCheck(args) {
   process.exitCode = 1;
 }
 
+/* The books, printed from what the server holds. */
+function report(args) {
+  const workspace = findWorkspace(args.workspace);
+  const r = require("../src/reports").fullReport(workspace.id, {
+    branchId: args.branch || "",
+    from: args.from || "",
+    to: args.to || "",
+  });
+
+  const money = (v) => "₹" + Number(v || 0).toLocaleString("en-IN", { minimumFractionDigits: 2 });
+  const line = (label, value) => console.log("  " + String(label).padEnd(26) + money(value).padStart(18));
+
+  console.log("");
+  console.log("Oasis books — " + workspace.code + "   " + r.branchId);
+  if (r.period.from || r.period.to) {
+    console.log("Period: " + (r.period.from || "the beginning") + " to " + (r.period.to || "today"));
+  }
+  console.log("Worked out by the server at " + r.generatedAt);
+
+  console.log("\nTrading");
+  line("Sales", r.trading.sales);
+  if (r.trading.purchases !== undefined) line("Purchases", r.trading.purchases);
+  line("Expenses", r.trading.expenses);
+  if (r.trading.grossProfit !== undefined) line("Gross profit", r.trading.grossProfit);
+  if (r.trading.netProfit !== undefined) line("Net profit", r.trading.netProfit);
+  line("GST on sales", r.trading.taxOnSales);
+
+  console.log("\nMoney");
+  line("Cash in hand", r.money.cash);
+  line("In the bank", r.money.bank);
+  if (r.money.card) line("Card or wallet", r.money.card);
+  line("Liquid total", r.money.liquid);
+  if (r.money.loans) line("Loans outstanding", r.money.loans);
+  line("Received", r.trading.moneyIn);
+  line("Paid out", r.trading.moneyOut);
+
+  console.log("\nOwed");
+  line("Customers owe you", r.receivable);
+  line("You owe suppliers", r.payable);
+  if (r.trading.stockAtCost !== undefined) line("Stock at cost", r.trading.stockAtCost);
+
+  console.log("\nOverdue money in");
+  const b = r.ageing.buckets;
+  line("Not yet due", b.current);
+  line("1 to 30 days", b.upTo30);
+  line("31 to 60 days", b.upTo60);
+  line("61 to 90 days", b.upTo90);
+  line("More than 90 days", b.over90);
+
+  console.log("\nJournals");
+  console.log("  debits " + money(r.journals.debits) + "   credits " + money(r.journals.credits) +
+    (r.journals.balanced ? "   balanced" : "   OUT BY " + money(r.journals.difference)));
+  for (const u of r.journals.unbalanced) {
+    console.log("  ! " + u.date + " " + (u.narration || "") + " — " + money(u.debits) + " / " + money(u.credits));
+  }
+
+  if (args.parties) {
+    console.log("\nBy party");
+    for (const p of r.parties) {
+      console.log("  " + String(p.name).slice(0, 30).padEnd(32) +
+        ("owes " + money(p.receivable)).padStart(22) +
+        ("owed " + money(p.payable)).padStart(22));
+    }
+  }
+  console.log("");
+
+  if (!r.journals.balanced) process.exitCode = 1;
+}
+
+/* Turn a second factor on or off for one person. */
+function twoFactor(args, turnOn) {
+  const workspace = findWorkspace(args.workspace);
+  const name = String(args.name || "").trim();
+  if (!name) die("Give a --name");
+
+  const d = open();
+  const user = d.prepare("SELECT * FROM users WHERE workspace_id = ? AND name_lc = ? AND deleted = 0")
+    .get(workspace.id, name.toLowerCase());
+  if (!user) die("No one called '" + name + "' in " + workspace.code);
+
+  if (!turnOn) {
+    d.prepare("UPDATE users SET totp_secret = '', version = version + 1, updated_at = ? WHERE workspace_id = ? AND id = ?")
+      .run(nowIso(), workspace.id, user.id);
+    console.log("Two-factor is off for " + user.name + ". A PIN alone will now sign them in.");
+    return;
+  }
+
+  const totp = require("../src/totp");
+  const secret = totp.newSecret();
+  d.prepare("UPDATE users SET totp_secret = ?, version = version + 1, updated_at = ? WHERE workspace_id = ? AND id = ?")
+    .run(secret, nowIso(), workspace.id, user.id);
+  revokeUserTokens(workspace.id, user.id);
+
+  console.log("Two-factor is on for " + user.name + " in " + workspace.code + ".");
+  console.log("");
+  console.log("  Set-up key : " + secret);
+  console.log("");
+  console.log("  Or paste this into the authenticator app, or turn it into a QR code:");
+  console.log("  " + totp.enrolmentUri(secret, user.name, workspace.code));
+  console.log("");
+  console.log("  Right now the app is showing: " + totp.currentCode(secret));
+  console.log("");
+  console.log("Add it to Google Authenticator, Authy or 1Password and check the code");
+  console.log("above matches before they next sign out. From now on they enter their");
+  console.log("PIN and then the six-digit code.");
+  console.log("");
+  console.log("This key is not stored anywhere you can read it back. If they lose the");
+  console.log("phone, run this again to issue a new one.");
+}
+
 function listWorkspaces() {
   const rows = open().prepare("SELECT * FROM workspaces ORDER BY created_at").all();
   if (!rows.length) {
@@ -352,6 +463,9 @@ function usage() {
   console.log("  set-branches  --workspace OASIS --name \"...\" --branches GZB,LONI   (or --all)");
   console.log("  backup        [--out DIR] [--keep 14] [--list]");
   console.log("  stock-check   --workspace OASIS");
+  console.log("  report        --workspace OASIS [--branch ID] [--from 2026-04-01] [--to 2027-03-31] [--parties]");
+  console.log("  enable-2fa    --workspace OASIS --name \"...\"");
+  console.log("  disable-2fa   --workspace OASIS --name \"...\"");
   console.log("  list-workspaces");
   console.log("");
   console.log("Roles: " + ROLES.join(", "));
@@ -366,6 +480,9 @@ const COMMANDS = {
   "set-branches": setBranches,
   "backup": backup,
   "stock-check": stockCheck,
+  "report": report,
+  "enable-2fa": (a) => twoFactor(a, true),
+  "disable-2fa": (a) => twoFactor(a, false),
   "list-workspaces": listWorkspaces,
 };
 

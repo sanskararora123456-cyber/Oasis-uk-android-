@@ -162,6 +162,20 @@ async function handleLogin(req, res) {
     throw new HttpError(401, "That workspace, name or PIN is not right");
   }
 
+  // A second factor, where the account has one. Checked after the PIN so that a
+  // wrong PIN never reveals whether an account uses one.
+  if (user.totp_secret) {
+    const supplied = String(body.totp || body.code || "").replace(/\D/g, "");
+    if (!supplied) {
+      for (const scope of scopes) auth.recordFailedLogin(scope);
+      throw new HttpError(401, "This sign-in needs the six-digit code from your authenticator app");
+    }
+    if (!require("./totp").verify(user.totp_secret, supplied)) {
+      for (const scope of scopes) auth.recordFailedLogin(scope);
+      throw new HttpError(401, "That six-digit code is not right, or it has just expired");
+    }
+  }
+
   for (const scope of scopes) auth.clearFailedLogins(scope);
 
   const accessToken = auth.issueAccessToken(workspace.id, user);
@@ -250,12 +264,44 @@ async function handleOperations(req, res) {
   sendJson(res, 200, result);
 }
 
+/* The books as this server works them out, independently of any phone. */
+function handleReport(req, res) {
+  const actor = requireUser(req);
+  const { can } = require("./permissions");
+  if (!can(actor, "see_reports")) {
+    throw new HttpError(403, "You do not have permission to see the reports");
+  }
+
+  const url = new URL(req.url, "http://placeholder");
+  const report = require("./reports").fullReport(actor.workspaceId, {
+    actor,
+    branchId: url.searchParams.get("branch") || "",
+    from: url.searchParams.get("from") || "",
+    to: url.searchParams.get("to") || "",
+    asOf: url.searchParams.get("asOf") || "",
+  });
+
+  // Cost prices and profit are a separate permission in the app.
+  if (!can(actor, "see_costs")) {
+    delete report.trading.stockAtCost;
+    delete report.trading.grossProfit;
+    delete report.trading.netProfit;
+    delete report.trading.purchases;
+  }
+  sendJson(res, 200, report);
+}
+
 function handleHealth(req, res) {
-  sendJson(res, 200, {
-    ok: true,
+  const replica = require("./replica").status();
+  // A stale replica is worth failing a health check over: whatever is watching
+  // this service should know the standby has stopped keeping up.
+  const ok = !replica.enabled || replica.healthy;
+  sendJson(res, ok ? 200 : 503, {
+    ok,
     service: "oasis-server",
     version: VERSION,
     time: new Date().toISOString(),
+    replica,
   });
 }
 
@@ -268,6 +314,7 @@ const ROUTES = [
   { method: "POST", path: "/v1/auth/refresh", handler: handleRefresh },
   { method: "GET", path: "/v1/client/bootstrap", handler: handleBootstrap },
   { method: "POST", path: "/v1/client/operations", handler: handleOperations },
+  { method: "GET", path: "/v1/reports/summary", handler: handleReport },
 ];
 
 async function route(req, res) {
@@ -314,6 +361,7 @@ const server = http.createServer((req, res) => {
 function start() {
   open();
   require("./backup").startSchedule();
+  require("./replica").startSchedule();
   server.listen(config.port, config.host, () => {
     console.log("Oasis server " + VERSION + " listening on " + config.host + ":" + config.port);
     console.log("Database: " + config.dbFile);

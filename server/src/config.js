@@ -37,6 +37,11 @@ const config = {
   backupDir: process.env.OASIS_BACKUP_DIR || path.join(process.cwd(), "backups"),
   backupEveryHours: num(process.env.OASIS_BACKUP_EVERY_HOURS, 0),
   backupKeep: num(process.env.OASIS_BACKUP_KEEP, 14),
+
+  /* A second, current copy of the database. Point this at another disk or a
+     mount from another machine; the README covers switching over to it. */
+  replicaPath: process.env.OASIS_REPLICA_PATH || "",
+  replicaEverySeconds: num(process.env.OASIS_REPLICA_EVERY_SECONDS, 60),
 };
 
 module.exports = { config };

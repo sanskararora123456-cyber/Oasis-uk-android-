@@ -22773,6 +22773,8 @@ function SignIn({ core, persist, onIn }) {
     const users = (core.users || []).filter((u) => u.active !== false);
     const [name, setName] = useState("");
     const [pin, setPin] = useState("");
+    // Only needed by accounts the server has a second factor turned on for.
+    const [totp, setTotp] = useState("");
     const [branch, setBranch] = useState("");
     const [code, setCode] = useState("");
     const [firmName, setFirmName] = useState("");
@@ -22789,7 +22791,7 @@ function SignIn({ core, persist, onIn }) {
             if (!name.trim()) { setErr("Enter your server user name"); return; }
             if (!/^\d{8,12}$/.test(pin)) { setErr("Use the 8–12 digit server PIN"); return; }
             try {
-                const out = await serverCall(serverCfg, "/v1/auth/login", { method: "POST", body: JSON.stringify({ workspaceCode: serverCfg.workspace.trim(), name: name.trim(), pin, deviceLabel: serverCfg.deviceLabel || "Oasis Android", platform: "android" }) });
+                const out = await serverCall(serverCfg, "/v1/auth/login", { method: "POST", body: JSON.stringify({ workspaceCode: serverCfg.workspace.trim(), name: name.trim(), pin, totp: totp.trim(), deviceLabel: serverCfg.deviceLabel || "Oasis Android", platform: "android" }) });
                 // Token is intentionally kept only in this in-memory config object.
                 const sessionCfg = { ...serverCfg, token: out.accessToken, refreshToken: out.refreshToken, user: out.user.name };
                 await saveSync(sessionCfg);
@@ -22826,6 +22828,9 @@ function SignIn({ core, persist, onIn }) {
             React.createElement("div", { className: "field" },
                 React.createElement("label", null, "Server PIN"),
                 React.createElement("input", { type: "password", inputMode: "numeric", value: pin, onChange: (e) => { setPin(e.target.value); setErr(""); }, onKeyDown: (e) => e.key === "Enter" && enter() })),
+            React.createElement("div", { className: "field" },
+                React.createElement("label", null, "Authenticator code"),
+                React.createElement("input", { inputMode: "numeric", autoComplete: "one-time-code", maxLength: 6, placeholder: "Only if you have been given one", value: totp, onChange: (e) => { setTotp(e.target.value.replace(/\D/g, "")); setErr(""); }, onKeyDown: (e) => e.key === "Enter" && enter() })),
             React.createElement("div", { className: "field" },
                 React.createElement("label", null, "Device name"),
                 React.createElement("input", { value: serverCfg.deviceLabel, onChange: (e) => setServerCfg({ ...serverCfg, deviceLabel: e.target.value }), placeholder: "Ghaziabad counter" })),
