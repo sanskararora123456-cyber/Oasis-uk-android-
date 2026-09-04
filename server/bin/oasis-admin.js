@@ -601,6 +601,141 @@ function clone(args) {
   console.log("put the new version on the real server.");
 }
 
+/* ------------------------------ making a change ---------------------------- */
+
+function change(args) {
+  const what = String(args._[1] || "").trim();
+  const changes = require("../src/changes");
+
+  if (!what || what === "list") {
+    const all = changes.list();
+    if (!all.length) {
+      console.log("No changes in " + changes.CHANGES_DIR);
+      return;
+    }
+    console.log("");
+    console.log("Changes available:");
+    for (const c of all) {
+      let applied = null;
+      if (args.workspace) {
+        const workspace = findWorkspace(args.workspace);
+        applied = changes.appliedAt(workspace.id, c.id);
+      }
+      console.log("  " + c.id.padEnd(44) + (c.field || "").padEnd(12) +
+        (applied ? "applied " + applied.at.slice(0, 10) : ""));
+      console.log("      " + c.description);
+    }
+    console.log("");
+    console.log("  node bin/oasis-admin.js change plan --workspace OASIS --id <id>");
+    console.log("");
+    return;
+  }
+
+  const workspace = findWorkspace(args.workspace);
+  const id = String(args.id || "").trim();
+  if (!id) die("Give an --id. `change list` shows what there is.");
+
+  if (what === "undo") {
+    let summary;
+    try {
+      summary = changes.undo(workspace.id, id, { confirm: !!args.confirm });
+    } catch (err) {
+      die(err.message);
+    }
+    console.log("");
+    console.log((summary.applied ? "Undid" : "Would undo") + " " + id);
+    console.log("  " + summary.touched + " record(s) were changed by it");
+    console.log("  " + summary.restorable + " can be put straight back");
+    if (summary.movedOn.length) {
+      console.log("  " + summary.movedOn.length + " have been edited since and will be left alone:");
+      for (const m of summary.movedOn.slice(0, 10)) {
+        console.log("      " + m.record_id + " (was v" + m.version + ", now v" + m.nowAt + ")" +
+          (m.why ? " — " + m.why : ""));
+      }
+      console.log("      Putting those back would throw away the later work, so they are not touched.");
+      console.log("      Use `history` and `revert` on them one at a time if you do want them back.");
+    }
+    console.log("");
+    if (!summary.applied) console.log("  Nothing has been changed. Add --confirm to go ahead.");
+    else console.log("  Done. Every previous version is still in the history.");
+    console.log("");
+    return;
+  }
+
+  let change;
+  try {
+    change = changes.load(id);
+  } catch (err) {
+    die(err.message);
+  }
+
+  const doIt = what === "apply";
+  if (doIt && !args.confirm) {
+    die("`change apply` needs --confirm. Run `change plan` first to see what it would do.");
+  }
+
+  let result;
+  try {
+    result = doIt
+      ? changes.apply(workspace.id, change, { ignoreFailures: !!args["ignore-failures"] })
+      : changes.plan(workspace.id, change, { samples: Number(args.samples) || 5 });
+  } catch (err) {
+    die(err.message);
+  }
+
+  console.log("");
+  console.log(change.id);
+  console.log("  " + change.description);
+  console.log("");
+  if (result.alreadyApplied) {
+    console.log("  ! This was already applied on " + result.alreadyApplied.at +
+      " to " + result.alreadyApplied.records + " record(s).");
+    console.log("");
+  }
+  console.log("  looked at " + result.looked + " " + change.field +
+    ", " + result.matched + " would change");
+
+  if (result.failures.length) {
+    console.log("  " + result.failures.length + " could not be worked out:");
+    for (const f of result.failures.slice(0, 5)) console.log("      " + f.id + ": " + f.error);
+  }
+  console.log("");
+
+  if (result.matched) {
+    console.log("  " + (result.samples.length < result.matched
+      ? "First " + result.samples.length + " of them:" : "All of them:"));
+    for (const s of result.samples) {
+      console.log("    " + s.id);
+      for (const c of s.changes) {
+        console.log("        " + c.field + ": " + String(c.from).slice(0, 70) +
+          "  ->  " + String(c.to).slice(0, 70));
+      }
+    }
+    console.log("");
+  }
+
+  if (doIt) {
+    console.log("  Applied to " + result.applied + " record(s).");
+    console.log("  Every previous version is in the history, so this can be undone:");
+    console.log("    node bin/oasis-admin.js change undo --workspace " + workspace.code + " --id " + change.id);
+    console.log("  Everyone needs to reopen the app to see it.");
+  } else if (result.matched) {
+    console.log("  Nothing has been changed. To go ahead:");
+    console.log("    node bin/oasis-admin.js change apply --workspace " + workspace.code +
+      " --id " + change.id + " --confirm");
+    console.log("");
+    console.log("  Worth rehearsing on a copy first:");
+    console.log("    node bin/oasis-admin.js clone --out /tmp/rehearsal.db");
+    console.log("    OASIS_DB=/tmp/rehearsal.db node bin/oasis-admin.js change apply --workspace " +
+      workspace.code + " --id " + change.id + " --confirm");
+    console.log("    OASIS_DB=/tmp/rehearsal.db node bin/oasis-admin.js verify --workspace " + workspace.code);
+  } else {
+    console.log("  Nothing matches. Either it has been applied already, or the");
+    console.log("  `select` in the change file does not pick anything out.");
+  }
+  console.log("");
+}
+
 function listWorkspaces() {
   const rows = open().prepare("SELECT * FROM workspaces ORDER BY created_at").all();
   if (!rows.length) {
@@ -640,6 +775,12 @@ function usage() {
   console.log("  revert        --workspace OASIS --id ID --to N     put a version back (--confirm to apply)");
   console.log("  revert        --workspace OASIS --id ID --undelete bring back something deleted");
   console.log("  clone         --out /tmp/scratch.db               a copy to try things on");
+  console.log("");
+  console.log("When the software needs changing:");
+  console.log("  change list                                      what changes exist");
+  console.log("  change plan   --workspace OASIS --id ID          what it would do (writes nothing)");
+  console.log("  change apply  --workspace OASIS --id ID --confirm do it");
+  console.log("  change undo   --workspace OASIS --id ID --confirm put it back");
   console.log("  list-workspaces");
   console.log("");
   console.log("Roles: " + ROLES.join(", "));
@@ -660,6 +801,7 @@ const COMMANDS = {
   "revert": revert,
   "what-changed": whatChanged,
   "clone": clone,
+  "change": change,
   "enable-2fa": (a) => twoFactor(a, true),
   "disable-2fa": (a) => twoFactor(a, false),
   "list-workspaces": listWorkspaces,

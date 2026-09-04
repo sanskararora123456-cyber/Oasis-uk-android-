@@ -142,6 +142,12 @@ node bin/oasis-admin.js what-changed --workspace OASIS --from 2026-09-14
 node bin/oasis-admin.js revert       --workspace OASIS --id <id> --to 4 [--confirm]
 node bin/oasis-admin.js revert       --workspace OASIS --id <id> --undelete [--confirm]
 node bin/oasis-admin.js clone        --out /tmp/scratch.db
+
+# when the software needs changing — see the section below
+node bin/oasis-admin.js change list
+node bin/oasis-admin.js change plan  --workspace OASIS --id <change id>
+node bin/oasis-admin.js change apply --workspace OASIS --id <change id> --confirm
+node bin/oasis-admin.js change undo  --workspace OASIS --id <change id> --confirm
 ```
 
 `stock-check` adds up the stock ledger and compares it with what each product
@@ -163,6 +169,114 @@ PINs are 8–12 digits, stored as a scrypt hash. They cannot be read back — if
 is forgotten, `reset-pin` issues a new one and signs that person's devices out.
 
 ---
+
+## When the software needs changing, months later
+
+Most changes are easier than they sound, and it is worth knowing which kind you
+are dealing with before touching anything.
+
+### Adding something — no data is touched at all
+
+A credit limit on customers, a new spec on doors, a note on invoices, a new
+document type, another report. **These need no migration and no change to
+stored data.** Records are kept exactly as the app sends them, with no fixed
+list of fields, so:
+
+- old records simply do not carry the new field, and the app reads a missing
+  field as empty
+- new records carry it, and sit alongside the old ones quite happily
+- nothing is rewritten, so a year of invoices is never at risk
+
+The work is in the app (`app/src/main/assets/index.html`), then a new APK. The
+server usually needs nothing. It needs a small change only when the new thing
+carries authority or arithmetic — a new permission (`src/permissions.js`), a new
+document type that moves stock (`src/stock.js`) or that has to add up
+(`src/totals.js`).
+
+### Updating the phones one at a time
+
+You will not install the new APK on every phone the same afternoon, so for a few
+days some phones run the old app and some the new one, against the same server.
+That is safe, and deliberately so: the app's edit screens are seeded with the
+whole record and write it back with one field replaced, so a phone that has
+never heard of `creditLimit` still passes it through untouched.
+
+`test/change.test.js` and a browser test check exactly this — a record carrying
+four fields the current build has no screen for, edited through the real UI, and
+every one of them still there afterwards. If you change how an edit screen is
+built, keep the `{ ...record }` spread; dropping it is how a staged rollout
+quietly strips data.
+
+### Reshaping records that already exist — the careful kind
+
+Splitting a field in two, correcting a value everywhere it was stored wrongly,
+moving to a new way of naming something. This is the kind that loses data, so it
+goes through a written change rather than typed-in SQL.
+
+A change is a small file in `changes/` — see the worked example there:
+
+```js
+module.exports = {
+  id: "2026-10-tidy-phone-numbers",          // same as the filename
+  description: "Store phone numbers as plain digits",
+  field: "parties",
+  select: (record) => /* which records to consider */,
+  apply:  (record) => ({ ...record, phone: tidy(record.phone) }),
+};
+```
+
+Then:
+
+```bash
+# 1. What would it do? Writes nothing.
+node bin/oasis-admin.js change plan --workspace OASIS --id 2026-10-tidy-phone-numbers
+
+#      looked at 412 parties, 38 would change
+#        a1b2…  phone: "+91 98100-00011"  ->  "9810000011"
+
+# 2. Rehearse it on a copy of the real data
+node bin/oasis-admin.js clone --out /tmp/rehearsal.db
+OASIS_DB=/tmp/rehearsal.db node bin/oasis-admin.js change apply --workspace OASIS --id … --confirm
+OASIS_DB=/tmp/rehearsal.db node bin/oasis-admin.js verify --workspace OASIS
+
+# 3. Do it for real
+node bin/oasis-admin.js change apply --workspace OASIS --id … --confirm
+
+# 4. And if it was a mistake
+node bin/oasis-admin.js change undo --workspace OASIS --id … --confirm
+```
+
+What that gets you:
+
+- **the plan changes nothing** — it reads, works out every record it would touch,
+  and shows you the first few actual before-and-afters
+- **all or nothing** — one transaction; if the change throws on record 300, the
+  first 299 are not left half-done
+- **every previous version is kept**, tagged with the change's id, so `undo` knows
+  precisely what to put back
+- **undo will not throw away later work** — a record someone has edited since is
+  reported and left alone, not rolled back over the top of them
+- **it is idempotent** — running it twice finds nothing left to do, because
+  `select` no longer matches
+- **it is a file** — reviewable, testable on a copy, and it runs the same way on
+  another machine
+
+### Changing the shape of the database itself
+
+Rarely needed, since record content has no fixed shape. When it is — a new column
+on `users`, a new table — append to `MIGRATIONS` in `src/db.js`. The server copies
+the database into `pre-migration/` before running one, and refuses to migrate if
+that copy cannot be taken.
+
+### Rolling back
+
+- **the app** — install the previous APK; the server serves both
+- **the server** — put the previous version back and restart; nothing about the
+  data changes
+- **a data change** — `change undo`
+- **one record** — `revert` (see below)
+- **the whole database** — restore a backup, and lose everything since. This is
+  the last resort, and everything above exists so you never need it.
 
 ## When something is wrong, months later
 
@@ -574,7 +688,7 @@ Back up the database file first and the change is reversible.
 npm test
 ```
 
-121 checks against a real server on a throwaway database.
+138 checks against a real server on a throwaway database.
 
 `test/totals-parity.test.js` (3) lifts `calcTotals` out of the app's own HTML and
 runs it against the server's copy over 5,000 randomly shaped documents — 65,000
@@ -603,6 +717,14 @@ invent stock — claiming 500 doors from a bill for 5, a purchase return that ad
 stock, negative quantities, an adjustment without the permission for it — while
 checking the legitimate paths still work, including the difference between a
 delivery note that moves doors and one that does not.
+
+`test/change.test.js` (17) covers making a change to software already in use:
+that a new field needs no migration and old and new records coexist, that an
+older app editing a newer record keeps the fields it does not know about, and
+then the careful kind — a plan that writes nothing, a change applied all-or-
+nothing, previous values kept, running it twice being a no-op, an undo that puts
+every record back but refuses to trample work done since, and a change that
+throws leaving nothing altered.
 
 `test/recovery.test.js` (15) plays out the case this is all for: months of
 trading, a field quietly wiped, and more invoices raised afterwards. It checks
