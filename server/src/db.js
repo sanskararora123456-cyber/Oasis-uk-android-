@@ -142,11 +142,67 @@ const MIGRATIONS = [
   // 3 — an optional second factor. Off for everyone until it is turned on, so
   // nobody is locked out by the upgrade.
   `ALTER TABLE users ADD COLUMN totp_secret TEXT NOT NULL DEFAULT '';`,
+
+  // 4 — every version of every record, kept.
+  //
+  // Without this a write destroys what was there before, so a bug found months
+  // later cannot be seen, understood or undone: the only remedy is restoring a
+  // backup and losing everything that happened since. With it, a single bad
+  // record can be put right on its own, and the wrong value is still there to
+  // look at afterwards.
+  `CREATE TABLE IF NOT EXISTS record_history (
+     id            INTEGER PRIMARY KEY AUTOINCREMENT,
+     workspace_id  TEXT NOT NULL,
+     field         TEXT NOT NULL,
+     record_id     TEXT NOT NULL,
+     version       INTEGER NOT NULL,
+     json          TEXT,
+     deleted       INTEGER NOT NULL DEFAULT 0,
+     at            TEXT NOT NULL,
+     by_user       TEXT NOT NULL DEFAULT '',
+     by_name       TEXT NOT NULL DEFAULT '',
+     reason        TEXT NOT NULL DEFAULT ''
+   );
+   CREATE INDEX IF NOT EXISTS history_by_record
+     ON record_history (workspace_id, field, record_id, version);
+   CREATE INDEX IF NOT EXISTS history_by_time
+     ON record_history (workspace_id, at);`,
 ];
+
+/* A copy of the database exactly as it was before any migration runs.
+
+   A migration that goes wrong on a database holding a year of invoices is the
+   worst moment to discover there was no way back. SQLite applies each migration
+   in a transaction and rolls it back on error, but that does not help against a
+   migration that succeeds and turns out to have been the wrong idea. This is the
+   file you go back to. */
+function safetyCopy(d, fromVersion) {
+  if (config.dbFile === ":memory:") return null;
+  const dir = path.join(path.dirname(config.dbFile), "pre-migration");
+  fs.mkdirSync(dir, { recursive: true });
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").replace("Z", "");
+  const file = path.join(dir, "before-v" + fromVersion + "-" + stamp + ".db");
+  d.exec("VACUUM INTO '" + file.replace(/'/g, "''") + "'");
+  return file;
+}
 
 function migrate(d) {
   const current = d.prepare("PRAGMA user_version").get().user_version;
   if (current >= MIGRATIONS.length) return;
+
+  // Nothing to preserve on a database being created from nothing.
+  if (current > 0) {
+    try {
+      const copy = safetyCopy(d, current);
+      if (copy) console.log("Copied the database before migrating: " + copy);
+    } catch (err) {
+      throw new Error(
+        "Refusing to migrate: could not take a copy first (" + err.message + "). " +
+        "Fix that before upgrading — a migration without a way back is not worth the risk."
+      );
+    }
+  }
 
   for (let version = current; version < MIGRATIONS.length; version += 1) {
     d.exec("BEGIN IMMEDIATE");

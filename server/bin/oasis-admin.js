@@ -435,6 +435,172 @@ function twoFactor(args, turnOn) {
   console.log("phone, run this again to issue a new one.");
 }
 
+/* ------------------------- when something is wrong ------------------------- */
+
+function verify(args) {
+  const workspace = findWorkspace(args.workspace);
+  const result = require("../src/doctor").check(workspace.id);
+
+  console.log("");
+  console.log("Checking " + workspace.code + " — " + result.checkedAt);
+  console.log("  " + Object.entries(result.counts).filter(([, n]) => n)
+    .map(([f, n]) => n + " " + f).join(", "));
+  console.log("  " + result.historyRows + " versions kept in the history");
+  console.log("");
+
+  if (!result.problems.length) {
+    console.log("  Nothing wrong found.");
+    console.log("");
+    return;
+  }
+
+  const serious = result.problems.filter((p) => p.severity === "serious");
+  const watch = result.problems.filter((p) => p.severity === "watch");
+
+  if (serious.length) {
+    console.log("  " + serious.length + " thing(s) that should not be true:");
+    for (const p of serious) console.log("    [" + p.kind + "] " + p.id + "\n        " + p.detail);
+    console.log("");
+  }
+  if (watch.length && !args.serious) {
+    console.log("  " + watch.length + " thing(s) worth a look but not necessarily wrong:");
+    for (const p of watch) console.log("    [" + p.kind + "] " + p.id + "\n        " + p.detail);
+    console.log("");
+  }
+
+  console.log("  To see how one of these got that way:");
+  console.log("    node bin/oasis-admin.js history --workspace " + workspace.code + " --id <the id above>");
+  console.log("");
+  if (serious.length) process.exitCode = 1;
+}
+
+function showHistory(args) {
+  const workspace = findWorkspace(args.workspace);
+  const id = String(args.id || "").trim();
+  if (!id) die("Give an --id. Get one from `verify`, or from the app's activity log.");
+
+  const versions = require("../src/repair").history(workspace.id, id, args.field);
+  if (!versions.length) {
+    console.log("Nothing recorded for '" + id + "'.");
+    console.log("Changes made before the history was added are not here.");
+    return;
+  }
+
+  console.log("");
+  console.log("History of " + versions[0].field + " " + id);
+  console.log("");
+  const { differences } = require("../src/repair");
+  let previous = null;
+  for (const v of versions) {
+    console.log("  v" + String(v.version).padEnd(4) + v.at + "   " + v.by +
+      (v.reason ? "   (" + v.reason + ")" : "") + (v.deleted ? "   DELETED" : ""));
+    if (args.full && v.record) {
+      console.log("        " + JSON.stringify(v.record));
+    } else if (previous && v.record) {
+      for (const d of differences(previous, v.record)) {
+        const from = String(d.from).slice(0, 60);
+        const to = String(d.to).slice(0, 60);
+        console.log("        " + d.field + ": " + from + "  ->  " + to);
+      }
+    }
+    previous = v.record || previous;
+  }
+  console.log("");
+  console.log("  To put one of these back:");
+  console.log("    node bin/oasis-admin.js revert --workspace " + workspace.code +
+    " --id " + id + " --to <version>");
+  console.log("  That shows what would change. Add --confirm to do it.");
+  console.log("");
+}
+
+function revert(args) {
+  const workspace = findWorkspace(args.workspace);
+  const id = String(args.id || "").trim();
+  if (!id) die("Give an --id");
+  if (args.to === undefined && !args.undelete) die("Give --to <version>, or --undelete");
+
+  const repair = require("../src/repair");
+  let plan;
+  try {
+    plan = args.undelete
+      ? repair.undelete(workspace.id, id, { field: args.field, confirm: !!args.confirm, reason: args.reason })
+      : repair.revert(workspace.id, id, Number(args.to), { field: args.field, confirm: !!args.confirm, reason: args.reason });
+  } catch (err) {
+    die(err.message);
+  }
+
+  console.log("");
+  console.log((plan.applied ? "Put back" : "Would put back") + " " + plan.field + " " + plan.recordId);
+  console.log("  from version " + plan.fromVersion + " to the content of version " + plan.toVersion +
+    " (written " + plan.takenFrom.at + " by " + plan.takenFrom.by + ")");
+  if (plan.wasDeleted) console.log("  it is currently deleted, and would come back");
+  console.log("");
+
+  if (!plan.changes.length) {
+    console.log("  Nothing would change — it already matches that version.");
+    console.log("");
+    return;
+  }
+
+  console.log("  " + plan.changes.length + " field(s) would change:");
+  for (const c of plan.changes) {
+    console.log("    " + c.field);
+    console.log("        now:  " + String(c.from).slice(0, 100));
+    console.log("        back: " + String(c.to).slice(0, 100));
+  }
+  console.log("");
+
+  if (plan.applied) {
+    console.log("  Done. It is now version " + plan.willBecomeVersion + ".");
+    console.log("  The old value is still in the history — this added a version, it did not erase one.");
+    console.log("  Everyone needs to sign in again, or reopen the app, to see it.");
+  } else {
+    console.log("  Nothing has been changed. Add --confirm to go ahead.");
+  }
+  console.log("");
+}
+
+function whatChanged(args) {
+  const workspace = findWorkspace(args.workspace);
+  const from = String(args.from || "").trim();
+  const to = String(args.to || new Date().toISOString()).trim();
+  if (!from) die("Give --from <when>, e.g. --from 2026-09-01 (anything a date reads as)");
+
+  const rows = require("../src/repair").changedBetween(workspace.id, from, to, args.field);
+  if (!rows.length) {
+    console.log("Nothing changed between " + from + " and " + to + ".");
+    return;
+  }
+  console.log("");
+  console.log(rows.length + " change(s) between " + from + " and " + to + ", newest first:");
+  console.log("");
+  for (const r of rows.slice(0, Number(args.limit) || 100)) {
+    console.log("  " + r.at + "  " + String(r.field).padEnd(12) + " v" + String(r.version).padEnd(4) +
+      " " + (r.by_name || "(unknown)").padEnd(16) + r.record_id + (r.deleted ? "  DELETED" : ""));
+  }
+  if (rows.length > (Number(args.limit) || 100)) {
+    console.log("  … and " + (rows.length - (Number(args.limit) || 100)) + " more (use --limit)");
+  }
+  console.log("");
+}
+
+/* A copy to break, so nothing is tried out on the real thing. */
+function clone(args) {
+  const out = String(args.out || "").trim();
+  if (!out) die("Give --out <file>, e.g. --out /tmp/scratch.db");
+  if (require("node:fs").existsSync(out)) die("'" + out + "' already exists. Pick a name that does not.");
+
+  open().exec("VACUUM INTO '" + out.replace(/'/g, "''") + "'");
+  console.log("Copied the live database to " + out);
+  console.log("");
+  console.log("Work against it without touching the real one:");
+  console.log("  OASIS_DB=" + out + " npm start");
+  console.log("  OASIS_DB=" + out + " node bin/oasis-admin.js verify --workspace " + (args.workspace || "OASIS"));
+  console.log("");
+  console.log("Reproduce the problem there, fix it, run the tests, and only then");
+  console.log("put the new version on the real server.");
+}
+
 function listWorkspaces() {
   const rows = open().prepare("SELECT * FROM workspaces ORDER BY created_at").all();
   if (!rows.length) {
@@ -466,6 +632,14 @@ function usage() {
   console.log("  report        --workspace OASIS [--branch ID] [--from 2026-04-01] [--to 2027-03-31] [--parties]");
   console.log("  enable-2fa    --workspace OASIS --name \"...\"");
   console.log("  disable-2fa   --workspace OASIS --name \"...\"");
+  console.log("");
+  console.log("When something looks wrong:");
+  console.log("  verify        --workspace OASIS [--serious]        check every record against every rule");
+  console.log("  history       --workspace OASIS --id ID [--full]   every version of one record");
+  console.log("  what-changed  --workspace OASIS --from 2026-09-01  everything that changed since");
+  console.log("  revert        --workspace OASIS --id ID --to N     put a version back (--confirm to apply)");
+  console.log("  revert        --workspace OASIS --id ID --undelete bring back something deleted");
+  console.log("  clone         --out /tmp/scratch.db               a copy to try things on");
   console.log("  list-workspaces");
   console.log("");
   console.log("Roles: " + ROLES.join(", "));
@@ -481,6 +655,11 @@ const COMMANDS = {
   "backup": backup,
   "stock-check": stockCheck,
   "report": report,
+  "verify": verify,
+  "history": showHistory,
+  "revert": revert,
+  "what-changed": whatChanged,
+  "clone": clone,
   "enable-2fa": (a) => twoFactor(a, true),
   "disable-2fa": (a) => twoFactor(a, false),
   "list-workspaces": listWorkspaces,

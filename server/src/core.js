@@ -155,6 +155,39 @@ function assembleCore(workspaceId, actor) {
 
 /* ------------------------------- writing state ------------------------------ */
 
+/* Who is making the change being applied right now, for the history. Set around
+   a batch and cleared afterwards; Node runs one batch at a time and a batch is
+   applied synchronously inside its transaction, so there is no crossover. */
+let currentActor = null;
+let currentReason = "";
+
+function withActor(actor, reason, fn) {
+  const wasActor = currentActor;
+  const wasReason = currentReason;
+  currentActor = actor || null;
+  currentReason = reason || "";
+  try {
+    return fn();
+  } finally {
+    currentActor = wasActor;
+    currentReason = wasReason;
+  }
+}
+
+/* Keep the version being written, so nothing is ever lost by overwriting. */
+function writeHistory(workspaceId, field, id, version, json, deleted) {
+  open().prepare(
+    `INSERT INTO record_history
+       (workspace_id, field, record_id, version, json, deleted, at, by_user, by_name, reason)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    workspaceId, field, id, version, json, deleted ? 1 : 0, nowIso(),
+    currentActor ? String(currentActor.id || "") : "",
+    currentActor ? String(currentActor.name || "") : "",
+    currentReason
+  );
+}
+
 function putRecord(workspaceId, field, id, record) {
   if (!id) throw badRequest("A record arrived without an id");
   const d = open();
@@ -169,24 +202,37 @@ function putRecord(workspaceId, field, id, record) {
     "SELECT version FROM records WHERE workspace_id = ? AND field = ? AND id = ?"
   ).get(workspaceId, field, id);
 
+  const version = existing ? existing.version + 1 : 1;
   if (existing) {
     d.prepare(
-      `UPDATE records SET json = ?, version = version + 1, deleted = 0, updated_at = ?
+      `UPDATE records SET json = ?, version = ?, deleted = 0, updated_at = ?
        WHERE workspace_id = ? AND field = ? AND id = ?`
-    ).run(json, at, workspaceId, field, id);
+    ).run(json, version, at, workspaceId, field, id);
   } else {
     d.prepare(
       `INSERT INTO records (workspace_id, field, id, json, version, deleted, created_at, updated_at)
        VALUES (?, ?, ?, ?, 1, 0, ?, ?)`
     ).run(workspaceId, field, id, json, at, at);
   }
+  writeHistory(workspaceId, field, id, version, json, false);
 }
 
 function deleteRecord(workspaceId, field, id) {
-  open().prepare(
-    `UPDATE records SET deleted = 1, version = version + 1, updated_at = ?
+  const d = open();
+  const existing = d.prepare(
+    "SELECT version, json FROM records WHERE workspace_id = ? AND field = ? AND id = ?"
+  ).get(workspaceId, field, id);
+  if (!existing) return;
+
+  const version = existing.version + 1;
+  d.prepare(
+    `UPDATE records SET deleted = 1, version = ?, updated_at = ?
      WHERE workspace_id = ? AND field = ? AND id = ?`
-  ).run(nowIso(), workspaceId, field, id);
+  ).run(version, nowIso(), workspaceId, field, id);
+
+  // The content is kept alongside the deletion, so a document deleted by
+  // mistake can be put back exactly as it was.
+  writeHistory(workspaceId, field, id, version, existing.json, true);
 }
 
 function appendAudit(workspaceId, entry) {
@@ -667,10 +713,12 @@ function applyOperations(workspaceId, actor, operations) {
   }
 
   let applied = 0;
-  for (const operation of operations) {
-    applyOperation(workspaceId, actor, operation);
-    applied += 1;
-  }
+  withActor(actor, "app", () => {
+    for (const operation of operations) {
+      applyOperation(workspaceId, actor, operation);
+      applied += 1;
+    }
+  });
 
   require("./stock").record(workspaceId, actor, stock.movements);
   return applied;
@@ -678,5 +726,5 @@ function applyOperations(workspaceId, actor, operations) {
 
 module.exports = {
   FIELDS, assembleCore, applyOperations, appendAudit,
-  readKv, writeKv, putRecord, deleteRecord, readUsers,
+  readKv, writeKv, putRecord, deleteRecord, readUsers, withActor,
 };

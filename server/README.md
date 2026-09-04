@@ -134,6 +134,14 @@ node bin/oasis-admin.js stock-check --workspace OASIS
 node bin/oasis-admin.js report      --workspace OASIS [--parties] [--from ...] [--to ...]
 node bin/oasis-admin.js enable-2fa  --workspace OASIS --name "..."
 node bin/oasis-admin.js disable-2fa --workspace OASIS --name "..."
+
+# when something is wrong — see the section below
+node bin/oasis-admin.js verify       --workspace OASIS
+node bin/oasis-admin.js history      --workspace OASIS --id <record id> [--full]
+node bin/oasis-admin.js what-changed --workspace OASIS --from 2026-09-14
+node bin/oasis-admin.js revert       --workspace OASIS --id <id> --to 4 [--confirm]
+node bin/oasis-admin.js revert       --workspace OASIS --id <id> --undelete [--confirm]
+node bin/oasis-admin.js clone        --out /tmp/scratch.db
 ```
 
 `stock-check` adds up the stock ledger and compares it with what each product
@@ -155,6 +163,114 @@ PINs are 8–12 digits, stored as a scrypt hash. They cannot be read back — if
 is forgotten, `reset-pin` issues a new one and signs that person's devices out.
 
 ---
+
+## When something is wrong, months later
+
+This is the part that matters most, and it is worth reading before you need it.
+
+The guiding rule is the one the books already follow: **you do not rub out a
+wrong entry, you post a correction.** Every version of every record is kept, so
+a fault can be seen, understood and put right on its own — without restoring a
+backup and throwing away everything that happened since.
+
+### 1. Find out what is actually wrong
+
+```bash
+node bin/oasis-admin.js verify --workspace OASIS
+```
+
+Reads every record and checks it against every rule the server enforces on
+writes: do the figures on each document match its lines, does every journal
+balance, does each product agree with its stock movements, is any amount
+negative or not a number, does anything point at a customer, branch or account
+that no longer exists, are two documents sharing a number, would the next
+document reuse one. **It only reads.** It changes nothing, so it is safe to run
+on a Friday afternoon.
+
+It separates what should not be true from what is only worth a look, and prints
+the id of anything it finds.
+
+### 2. Find out how it got that way
+
+```bash
+node bin/oasis-admin.js history --workspace OASIS --id <the id>
+```
+
+Every version of that record, oldest first, with the date, who made the change,
+and which fields changed at each step:
+
+```
+  v1   2026-04-02T09:14:02Z   Sanskar
+  v2   2026-04-11T16:02:55Z   Ravi
+        phone: "9810000001"  ->  "9810000002"
+  v5   2026-09-14T11:31:07Z   Ravi
+        gstin: "09AAAAA0000A1Z5"  ->  ""
+```
+
+If you do not know which record, start from the time instead:
+
+```bash
+node bin/oasis-admin.js what-changed --workspace OASIS --from 2026-09-14
+```
+
+### 3. Put it right
+
+```bash
+# Shows exactly what would change. Changes nothing.
+node bin/oasis-admin.js revert --workspace OASIS --id <id> --to 4
+
+# Do it.
+node bin/oasis-admin.js revert --workspace OASIS --id <id> --to 4 --confirm \
+  --reason "GST number wiped by a bug in the September build"
+```
+
+The dry run is the default; nothing is written until `--confirm`. The old
+content goes back **as a new version on top**, so:
+
+- the wrong value is still in the history, with the date it was made and the
+  date it was undone
+- everything done since is untouched — invoices raised after the fault stay
+  exactly as they are
+- the repair itself is in the activity log, with the reason
+- and the repair can itself be reverted, if it turns out to have been wrong
+
+Something deleted by mistake comes back whole, figures and all:
+
+```bash
+node bin/oasis-admin.js revert --workspace OASIS --id <id> --undelete --confirm
+```
+
+Everyone needs to reopen the app to see the change.
+
+### 4. Fixing the code, not the data
+
+If the fault is in the software rather than one record, work on a copy:
+
+```bash
+node bin/oasis-admin.js clone --out /tmp/scratch.db
+OASIS_DB=/tmp/scratch.db npm start        # reproduce it here
+OASIS_DB=/tmp/scratch.db node bin/oasis-admin.js verify --workspace OASIS
+```
+
+Reproduce it against real data without touching the real thing, fix it, run
+`npm test`, and only then deploy. If a fix needs a schema change, add a
+migration (below) — the server takes its own copy of the database before running
+one, into `pre-migration/`, so there is always a way back.
+
+Rolling back the code is putting the previous version back and restarting. Roll
+back the *data* only if you have to, and know that it costs you everything since
+that backup — which is what the history above exists to avoid.
+
+### What the history does not cover
+
+- Changes made **before** the history existed. It starts from this version.
+- Rows changed by editing the SQLite file directly, behind the server's back —
+  `verify` will notice the damage, but there is no history of who did it.
+- Staff records, settings and the numbering counters live outside `records` and
+  are not versioned. Staff changes are in the activity log.
+- It grows. Every version of every record is kept, so on a busy database the
+  file gets larger over time; that is the trade for being able to undo a
+  six-month-old mistake.
 
 ## Two-factor sign-in
 
@@ -434,8 +550,12 @@ touching either file.
 
 `src/db.js` keeps a `MIGRATIONS` list and SQLite records how many have run in
 `user_version`, so a database holding a year of invoices is upgraded in place
-rather than rebuilt. To change the schema, append an entry — never edit or reorder
-an existing one, because databases in the field have already run it.
+rather than rebuilt. Before any migration runs, the server writes a copy of the
+database as it was into `pre-migration/` — going back is putting that file in
+place. A migration that cannot be copied first is refused rather than risked.
+
+To change the schema, append an entry — never edit or reorder an existing one,
+because databases in the field have already run it.
 
 ```js
 const MIGRATIONS = [
@@ -454,7 +574,7 @@ Back up the database file first and the change is reversible.
 npm test
 ```
 
-106 checks against a real server on a throwaway database.
+121 checks against a real server on a throwaway database.
 
 `test/totals-parity.test.js` (3) lifts `calcTotals` out of the app's own HTML and
 runs it against the server's copy over 5,000 randomly shaped documents — 65,000
@@ -483,6 +603,15 @@ invent stock — claiming 500 doors from a bill for 5, a purchase return that ad
 stock, negative quantities, an adjustment without the permission for it — while
 checking the legitimate paths still work, including the difference between a
 delivery note that moves doors and one that does not.
+
+`test/recovery.test.js` (15) plays out the case this is all for: months of
+trading, a field quietly wiped, and more invoices raised afterwards. It checks
+the fault can be found, traced to when and who, reverted after a dry run that
+changes nothing, that the later invoices survive, that the wrong value is still
+in the history rather than erased, that the repair is logged and can itself be
+undone, that a deleted invoice comes back whole, that `verify` catches a record
+corrupted behind the server's back, and that a migration copies the database
+first.
 
 `test/hardening.test.js` (25) has a second device save over a record someone else
 already changed and requires a 409 with the first person's work intact; turns a
