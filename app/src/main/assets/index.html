@@ -17964,11 +17964,17 @@ function OasisApp() {
         setToast(m);
         setTimeout(() => setToast(""), 2200);
     }, []);
-    const persist = useCallback(async (nextCore, nextImages) => {
+    /* `baseCore` is what nextCore is compared against to work out what changed.
+       It defaults to the state on screen, which is what an ordinary save wants.
+       Signing in passes the state the server just sent, so only what the app
+       added on top of it is uploaded — otherwise the first save after every
+       sign-in echoes the entire company database back to the server. */
+    const persist = useCallback(async (nextCore, nextImages, baseCore) => {
         try {
             const cfg = await loadSync();
-            if (nextCore && cfg && cfg.url && cfg.token && core) {
-                await syncChangedState(core, nextCore, cfg);
+            const base = baseCore || core;
+            if (nextCore && cfg && cfg.url && cfg.token && base) {
+                await syncChangedState(base, nextCore, cfg);
                 const remote = await serverCall(cfg, "/v1/client/bootstrap");
                 nextCore = upgradeCore({ ...BLANK_CORE, ...(remote.core || nextCore) });
             }
@@ -22788,7 +22794,11 @@ function SignIn({ core, persist, onIn }) {
                 const sessionCfg = { ...serverCfg, token: out.accessToken, refreshToken: out.refreshToken, user: out.user.name };
                 await saveSync(sessionCfg);
                 const remote = await serverCall(sessionCfg, "/v1/client/bootstrap");
-                await persist(upgradeCore({ ...BLANK_CORE, ...(remote.core || {}) }));
+                // Compare against exactly what the server sent, so the only
+                // things uploaded are what upgradeCore adds on a first run.
+                const fromServer = { ...BLANK_CORE, ...(remote.core || {}) };
+                const upgraded = upgradeCore(JSON.parse(JSON.stringify(fromServer)));
+                await persist(upgraded, undefined, fromServer);
                 onIn(remote.user || out.user);
                 return;
             } catch (e) { setErr(e.message || "Server sign-in failed"); return; }

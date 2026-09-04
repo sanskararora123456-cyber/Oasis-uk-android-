@@ -19,8 +19,9 @@ const { open } = require("../src/db");
 const { hashPin, revokeUserTokens } = require("../src/auth");
 const { putRecord, readUsers, appendAudit } = require("../src/core");
 const { config } = require("../src/config");
+const { ROLES: ROLE_PERMS } = require("../src/permissions");
 
-const ROLES = ["admin", "admin2", "salesman", "accountant", "storeman"];
+const ROLES = Object.keys(ROLE_PERMS);
 
 function parseArgs(argv) {
   const out = { _: [] };
@@ -75,10 +76,32 @@ function createWorkspace(args) {
   d.prepare("INSERT INTO workspaces (id, code, name, created_at) VALUES (?, ?, ?, ?)")
     .run(id, code, name, nowIso());
 
-  // One branch so the app has somewhere to file documents from the first save.
+  // A firm, and one branch belonging to it.
+  //
+  // The branch must carry companyId from the start. On first sign-in the app
+  // stamps that field onto any branch missing it and saves the change — and
+  // editing a branch is an admin-only action, so if the first person through
+  // the door is a salesman their very first save is refused. Seeding it here
+  // means the app has nothing to fix up. Everything else the app seeds on
+  // first run (starter categories, the branch's cash and bank accounts) it is
+  // allowed to create while those collections are still empty.
+  const companyId = crypto.randomUUID();
+  putRecord(id, "companies", companyId, {
+    id: companyId,
+    name: name || "Oasis UK Steel Doors",
+    legalName: name || "Oasis UK Steel Doors",
+    gstin: "", pan: "", phone: "", email: "", website: "",
+    address1: "", address2: "",
+    city: String(args.city || ""),
+    state: "Uttar Pradesh", pin: "",
+    logoMark: "", logoWord: "", qr: "",
+    tagline: "Steel Doors", active: true,
+  });
+
   const branchId = crypto.randomUUID();
   putRecord(id, "branches", branchId, {
     id: branchId,
+    companyId,
     name: String(args.branch || "Head office"),
     code: String(args["branch-code"] || "HO").toUpperCase(),
     city: String(args.city || ""),
@@ -112,11 +135,16 @@ function addUser(args) {
 
   const { hash, salt } = hashPin(pin);
   const id = crypto.randomUUID();
+  // The app writes the role's permission list onto the record when a role is
+  // picked, and both the app and the server read permissions from that list
+  // rather than from the role name. Leaving it empty here would create someone
+  // who can sign in and then do nothing at all.
+  const perms = JSON.stringify(ROLE_PERMS[role] || []);
   d.prepare(
     `INSERT INTO users (workspace_id, id, name, name_lc, role, perms, branch, active,
        pin_hash, pin_salt, extra, version, deleted, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, '[]', '', 1, ?, ?, '{}', 1, 0, ?, ?)`
-  ).run(workspace.id, id, name, name.toLowerCase(), role, hash, salt, nowIso(), nowIso());
+     VALUES (?, ?, ?, ?, ?, ?, '', 1, ?, ?, '{}', 1, 0, ?, ?)`
+  ).run(workspace.id, id, name, name.toLowerCase(), role, perms, hash, salt, nowIso(), nowIso());
 
   appendAudit(workspace.id, {
     by: "console", byId: "console", role: "admin",
@@ -178,9 +206,16 @@ function addBranch(args) {
   const name = String(args.name || "").trim();
   if (!name) die("Give a --name");
 
+  // Same reason as create-workspace: a branch without companyId makes the app
+  // rewrite it on the next sign-in, which only an admin is allowed to do.
+  const firm = open().prepare(
+    "SELECT id FROM records WHERE workspace_id = ? AND field = 'companies' AND deleted = 0 LIMIT 1"
+  ).get(workspace.id);
+
   const id = crypto.randomUUID();
   putRecord(workspace.id, "branches", id, {
     id,
+    companyId: firm ? firm.id : "",
     name,
     code: String(args.code || name.slice(0, 3)).toUpperCase(),
     city: String(args.city || ""),

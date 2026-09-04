@@ -189,23 +189,87 @@ genuinely should:
 - **Every authorisation decision.** Only an admin can change staff access, and no
   workspace can read another, whatever the app asks for.
 
-### What is not built
+---
 
-Worth knowing before you rely on it:
+## Security model
 
-- **Accounting is the app's, not the server's.** Journals and ledgers are computed
-  on the phone and stored here as-is. The server does not independently re-derive
-  double-entry postings, so it will not catch an arithmetic mistake in the client.
-- **Stock adjustments are recorded, not recalculated.** The quantity in the
-  product record is what the app worked out; `stock_ledger` is history alongside
-  it, not the source of truth.
-- **Last write wins**, except for payment, expense and transfer corrections, which
-  carry a version and are rejected with `409` if someone else got there first. Two
-  people editing the same customer at the same moment: the later save wins.
+What is actually enforced, and what is not. Read this before trusting it with
+real money.
+
+### Enforced here, on the server
+
+- **Permissions on every operation.** The app hides screens a person may not use,
+  but that is a courtesy, not a control — the app is on someone else's phone and
+  anyone holding a token can send requests directly. `src/permissions.js` mirrors
+  the app's own role table and re-checks every operation. A salesman cannot delete
+  an invoice, read or rewrite a cost price, touch a cash account, record a payment,
+  write a journal entry or create a branch, no matter what they send.
+  `test/permissions.test.js` tries all of those as a salesman and requires a 403.
+- **Nobody can promote themselves.** A person may change their own PIN and display
+  name. Role, permissions, branch and whether the account is switched on are grants
+  from an admin, and a self-edit cannot touch them.
+- **Workspace isolation.** Every query is scoped by workspace. One firm's token
+  returns nothing belonging to another.
+- **PINs never come back.** They are stored as scrypt hashes and are never included
+  in any response, so the phone never holds one.
+- **Brute force.** Sign-in locks out by address *and* by account name after 8
+  failures. Failure messages never reveal which of the three fields was wrong.
+- **Refresh tokens are single-use.** Redeeming one retires it, so a stolen copy
+  stops working the moment the real device uses its own.
+- **A batch is all or nothing.** Permissions are checked across the whole batch
+  before anything is applied, and the write runs in one transaction. A refused
+  operation cannot leave half a save behind.
+
+### Not enforced — the honest list
+
+- **A PIN is the only credential.** Eight to twelve digits, no second factor. That
+  is the app's design, not a server choice: the sign-in screen accepts nothing
+  else. Lockout and hashing make guessing impractical, but anyone who learns a
+  PIN *is* that person. Treat PINs like keys to the shop.
+- **The server does not check your arithmetic.** The app computes document totals,
+  journals and stock, and this server stores what it is given. It enforces *who*
+  may write a record, not whether the numbers inside it add up. A modified client
+  could file an invoice whose total does not match its lines. Reworking this means
+  the server recomputing totals itself — a real piece of work, and it has to
+  produce byte-identical records or the app's change detection resends them
+  forever.
+- **Last write wins** on most records. Payment, expense and transfer corrections
+  carry a version and get a `409` if someone else got there first; everything else
+  does not. Two people editing one customer at the same moment: the later save
+  wins silently.
+- **Branch scoping is not enforced.** A user assigned to one branch can still read
+  every branch through the API. The app filters the view; the server does not.
+- **An access token cannot be withdrawn early.** Signing someone out or changing
+  their PIN kills their refresh token immediately, but an access token already
+  issued stays valid until it expires — up to 30 minutes. Lower `OASIS_ACCESS_TTL`
+  if that window matters to you.
+- **One machine, one file.** No replication and no failover. If the disk dies and
+  you have no backup, the data is gone. The backup section above is not optional.
 - **No file or photo storage.** Document images stay on the device.
 
-None of that stops day-to-day use. It matters if you plan several people working
-the same records at the same time, or want the server to audit the books.
+### If you want it stronger
+
+In rough order of value for the effort: enforce branch scoping; add versions to
+every record so no save is ever silently overwritten; have the server recompute
+document totals and reject ones that do not match; add a second factor for admin
+accounts. Each is a contained change — the permission layer and the tests around
+it are the pattern to follow.
+
+## Changing the schema later
+
+`src/db.js` keeps a `MIGRATIONS` list and SQLite records how many have run in
+`user_version`, so a database holding a year of invoices is upgraded in place
+rather than rebuilt. To change the schema, append an entry — never edit or reorder
+an existing one, because databases in the field have already run it.
+
+```js
+const MIGRATIONS = [
+  SCHEMA,
+  `ALTER TABLE records ADD COLUMN locked INTEGER NOT NULL DEFAULT 0`,  // 2
+];
+```
+
+Back up the database file first and the change is reversible.
 
 ---
 
@@ -215,7 +279,15 @@ the same records at the same time, or want the server to audit the books.
 npm test
 ```
 
-21 checks against a real server on a throwaway database: sign-in and its failure
-modes, PIN and token handling, workspace isolation, brute-force lockout, the
-byte-for-byte record round trip, idempotency, transaction rollback, stale-write
-conflicts and the CORS headers the WebView needs.
+33 checks against a real server on a throwaway database.
+
+`test/api.test.js` (21) covers sign-in and its failure modes, PIN and token
+handling, workspace isolation, brute-force lockout, the byte-for-byte record
+round trip, idempotency, transaction rollback, stale-write conflicts and the
+CORS headers the WebView needs.
+
+`test/permissions.test.js` (12) signs in as a salesman and tries to do things
+the app never offers them — deleting an invoice, rewriting a cost price, moving
+money, forging a journal entry, creating a branch, promoting themselves — and
+requires each to be refused, while checking that they can still quote and that
+an admin is not obstructed.

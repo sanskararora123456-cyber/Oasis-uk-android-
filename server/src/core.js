@@ -427,11 +427,16 @@ function upsertUser(workspaceId, actor, id, record) {
   ).get(workspaceId, name.toLowerCase(), id);
   if (clash) throw badRequest("Someone already has that name");
 
-  // A non-admin editing themselves may change their PIN, not their own role.
+  // A non-admin editing themselves may change their PIN and their display name.
+  // Role, permissions, branch and whether the account is switched on are all
+  // grants from someone else — letting a self-edit touch them would be a way to
+  // promote yourself.
   const role = canManage ? String(record.role || existing?.role || "salesman") : (existing?.role || "salesman");
   const perms = canManage
     ? JSON.stringify(Array.isArray(record.perms) ? record.perms : [])
     : (existing?.perms || "[]");
+  const branch = canManage ? String(record.branch || "") : (existing?.branch || "");
+  const active = canManage ? (record.active === false ? 0 : 1) : (existing ? existing.active : 1);
 
   const pin = record.pin === undefined || record.pin === null ? "" : String(record.pin);
   let pinHash = existing ? existing.pin_hash : null;
@@ -456,8 +461,8 @@ function upsertUser(workspaceId, actor, id, record) {
          pin_hash = ?, pin_salt = ?, extra = ?, version = version + 1, deleted = 0, updated_at = ?
        WHERE workspace_id = ? AND id = ?`
     ).run(
-      name, name.toLowerCase(), role, perms, String(record.branch || ""),
-      record.active === false ? 0 : 1, pinHash, pinSalt, JSON.stringify(extra), at,
+      name, name.toLowerCase(), role, perms, branch,
+      active, pinHash, pinSalt, JSON.stringify(extra), at,
       workspaceId, id
     );
   } else {
@@ -466,8 +471,8 @@ function upsertUser(workspaceId, actor, id, record) {
          pin_hash, pin_salt, extra, version, deleted, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`
     ).run(
-      workspaceId, id, name, name.toLowerCase(), role, perms, String(record.branch || ""),
-      record.active === false ? 0 : 1, pinHash, pinSalt, JSON.stringify(extra), at, at
+      workspaceId, id, name, name.toLowerCase(), role, perms, branch,
+      active, pinHash, pinSalt, JSON.stringify(extra), at, at
     );
   }
 
@@ -485,9 +490,17 @@ function upsertUser(workspaceId, actor, id, record) {
 }
 
 function applyOperations(workspaceId, actor, operations) {
-  let applied = 0;
+  const { assertAllowed } = require("./permissions");
+
+  // Check the whole batch before applying any of it, so a refusal never leaves
+  // half a save behind. The caller runs this inside a transaction as well.
   for (const operation of operations) {
     if (!operation || typeof operation !== "object") throw badRequest("An operation was not an object");
+    assertAllowed(workspaceId, actor, operation);
+  }
+
+  let applied = 0;
+  for (const operation of operations) {
     applyOperation(workspaceId, actor, operation);
     applied += 1;
   }

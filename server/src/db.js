@@ -9,10 +9,15 @@ const crypto = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
 const { config } = require("./config");
 
-const SCHEMA = `
+/* Connection settings. These cannot run inside a transaction, so they are
+   applied when the database is opened rather than as part of a migration. */
+const PRAGMAS = `
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
+`;
 
+const SCHEMA = `
 CREATE TABLE IF NOT EXISTS server_meta (
   key         TEXT PRIMARY KEY,
   value       TEXT NOT NULL
@@ -116,6 +121,40 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 CREATE INDEX IF NOT EXISTS login_attempts_scope ON login_attempts (scope, at);
 `;
 
+/* Schema changes, in order, applied once each.
+
+   SQLite records which have run in `user_version`, so a database that already
+   holds a year of invoices gets upgraded in place rather than needing to be
+   rebuilt. To change the schema later, append an entry — never edit or reorder
+   an existing one, because the databases in the field have already run it.
+
+   Adding a column:
+     `ALTER TABLE records ADD COLUMN locked INTEGER NOT NULL DEFAULT 0`
+   Back the file up first (see the README) and the change is reversible. */
+const MIGRATIONS = [
+  // 1 — the starting schema.
+  SCHEMA,
+];
+
+function migrate(d) {
+  const current = d.prepare("PRAGMA user_version").get().user_version;
+  if (current >= MIGRATIONS.length) return;
+
+  for (let version = current; version < MIGRATIONS.length; version += 1) {
+    d.exec("BEGIN IMMEDIATE");
+    try {
+      d.exec(MIGRATIONS[version]);
+      // PRAGMA will not take a bound parameter, and this is a loop counter.
+      d.exec("PRAGMA user_version = " + (version + 1));
+      d.exec("COMMIT");
+      if (current > 0) console.log("Applied database migration " + (version + 1));
+    } catch (err) {
+      try { d.exec("ROLLBACK"); } catch (_) { /* already unwound */ }
+      throw new Error("Database migration " + (version + 1) + " failed: " + err.message);
+    }
+  }
+}
+
 let db = null;
 
 function open() {
@@ -123,7 +162,8 @@ function open() {
   const dir = path.dirname(config.dbFile);
   fs.mkdirSync(dir, { recursive: true });
   db = new DatabaseSync(config.dbFile);
-  db.exec(SCHEMA);
+  db.exec(PRAGMAS);
+  migrate(db);
   return db;
 }
 
