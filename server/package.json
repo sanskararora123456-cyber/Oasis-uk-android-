@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node --no-warnings=ExperimentalWarning src/server.js",
     "admin": "node --no-warnings=ExperimentalWarning bin/oasis-admin.js",
-    "test": "node --no-warnings=ExperimentalWarning test/totals-parity.test.js && node --no-warnings=ExperimentalWarning test/api.test.js && node --no-warnings=ExperimentalWarning test/permissions.test.js && node --no-warnings=ExperimentalWarning test/integrity.test.js && node --no-warnings=ExperimentalWarning test/accounting.test.js && node --no-warnings=ExperimentalWarning test/hardening.test.js && node --no-warnings=ExperimentalWarning test/recovery.test.js && node --no-warnings=ExperimentalWarning test/change.test.js",
+    "test": "node --no-warnings=ExperimentalWarning test/editors.test.js && node --no-warnings=ExperimentalWarning test/totals-parity.test.js && node --no-warnings=ExperimentalWarning test/api.test.js && node --no-warnings=ExperimentalWarning test/permissions.test.js && node --no-warnings=ExperimentalWarning test/integrity.test.js && node --no-warnings=ExperimentalWarning test/accounting.test.js && node --no-warnings=ExperimentalWarning test/hardening.test.js && node --no-warnings=ExperimentalWarning test/recovery.test.js && node --no-warnings=ExperimentalWarning test/change.test.js",
     "backup": "node --no-warnings=ExperimentalWarning bin/oasis-admin.js backup",
     "verify": "node --no-warnings=ExperimentalWarning bin/oasis-admin.js verify"
   },

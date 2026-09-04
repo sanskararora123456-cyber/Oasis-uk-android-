@@ -20339,6 +20339,12 @@ function PaymentForm({ core, persist, flash, setScreen, payment, me, can, branch
     const side = payment.kind === "out" ? "purchase" : "sales";
     const pool = core.parties.filter((x) => partyFits(x, side));
     const [f, setF] = useState({
+        /* Everything the record already carries, first. Saving replaces the
+           record with this object, so a field not named below would otherwise be
+           dropped the next time someone edits the payment — including fields a
+           newer version of the app has added and this one has never heard of.
+           The keys after this one still win; they only supply defaults. */
+        ...payment,
         id: payment.id || uid(),
         branch: payment.branch || branch,
         kind: payment.kind,
