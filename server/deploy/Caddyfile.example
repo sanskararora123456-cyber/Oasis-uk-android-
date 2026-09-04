@@ -1,0 +1,26 @@
+# Caddy in front of the Oasis server.
+#
+#   sudo cp Caddyfile.example /etc/caddy/Caddyfile
+#   # change the domain below to yours, then:
+#   sudo systemctl reload caddy
+#
+# Caddy gets and renews the HTTPS certificate on its own, which is what the
+# Android app needs — it refuses plain http:// addresses.
+
+oasis.yourdomain.com {
+	encode gzip
+
+	# The app sends its own CORS preflight; the server answers it. Nothing to add.
+	reverse_proxy 127.0.0.1:8080
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/oasis.log
+	}
+}

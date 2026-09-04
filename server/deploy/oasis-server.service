@@ -1,0 +1,42 @@
+# systemd unit for the Oasis server.
+#
+#   sudo cp oasis-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now oasis-server
+#   journalctl -u oasis-server -f
+#
+# Adjust User, WorkingDirectory and the secret below to match your machine.
+
+[Unit]
+Description=Oasis UK Steel Doors server
+After=network.target
+
+[Service]
+Type=simple
+User=oasis
+WorkingDirectory=/opt/oasis/server
+ExecStart=/usr/bin/node --no-warnings=ExperimentalWarning src/server.js
+Restart=always
+RestartSec=3
+
+# Bind to localhost only: Caddy is what faces the internet.
+Environment=HOST=127.0.0.1
+Environment=PORT=8080
+Environment=OASIS_DB=/var/lib/oasis/oasis.db
+
+# Generate once with:  openssl rand -base64 48
+# Better still, put it in an EnvironmentFile that only root can read.
+Environment=OASIS_JWT_SECRET=CHANGE_ME
+
+# Caddy sets X-Forwarded-For, so the sign-in lockout can trust it.
+Environment=OASIS_TRUST_PROXY=1
+
+# Sandboxing. The service only ever needs to write its database directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/oasis
+
+[Install]
+WantedBy=multi-user.target

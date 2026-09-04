@@ -1,0 +1,16 @@
+{
+  "name": "oasis-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend for the Oasis UK Steel Doors app: authentication and the authoritative company database.",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node --no-warnings=ExperimentalWarning src/server.js",
+    "admin": "node --no-warnings=ExperimentalWarning bin/oasis-admin.js",
+    "test": "node --no-warnings=ExperimentalWarning test/api.test.js"
+  },
+  "dependencies": {}
+}
